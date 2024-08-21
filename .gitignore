@@ -1,3 +1,6 @@
 /target
 # Ignore non-reviewed insta snapshots
 *.snap.new
+
+# Ensure we don't screw up the vendor directory in the source package
+!/vendor/*
