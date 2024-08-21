@@ -1,0 +1,16 @@
+Source: cargo-nextest
+Section: devel
+Priority: optional
+Maintainer: Pexip AS <packaging@pexip.com>
+Standards-Version: 4.3.0
+Build-Depends: debhelper-compat (= 13), cargo
+Vcs-Browser: https://github.com/pexip/os-cargo-nextest/
+Vcs-Git: https://github.com/pexip/os-cargo-nextest.git
+XS-Upstream-Git: https://github.com/nextest-rs/nextest
+
+Package: cargo-nextest
+Architecture: any
+Depends: ${misc:Depends},
+ ${shlib:Depends},
+Description: Test runner for rust
+ Nextest is a next-generation test runner for Rust.

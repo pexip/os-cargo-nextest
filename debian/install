@@ -1,0 +1,1 @@
+target/release/cargo-nextest /usr/bin

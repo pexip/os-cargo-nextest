@@ -1,0 +1,5 @@
+cargo-nextest (0.9.72+pexip24u1) pexip; urgency=medium
+
+  * New upstream release
+
+ -- Mark Hymers <mark.hymers@pexip.com>  Wed, 21 Aug 2024 11:36:16 +0100
