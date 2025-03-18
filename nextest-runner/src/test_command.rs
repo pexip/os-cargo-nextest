@@ -10,14 +10,17 @@ use crate::{
 };
 use camino::{Utf8Path, Utf8PathBuf};
 use guppy::graph::PackageMetadata;
-use once_cell::sync::Lazy;
 use std::{
     collections::{BTreeSet, HashMap},
     ffi::{OsStr, OsString},
+    fs::File,
+    io::{BufRead, BufReader},
+    sync::LazyLock,
 };
+use tracing::warn;
 
 mod imp;
-pub use imp::{Child, Output};
+pub(crate) use imp::{Child, ChildAccumulator, ChildFds};
 
 #[derive(Clone, Debug)]
 pub(crate) struct LocalExecuteContext<'a> {
@@ -25,6 +28,7 @@ pub(crate) struct LocalExecuteContext<'a> {
     pub(crate) rust_build_meta: &'a RustBuildMeta<TestListState>,
     pub(crate) double_spawn: &'a DoubleSpawnInfo,
     pub(crate) dylib_path: &'a OsStr,
+    pub(crate) profile_name: &'a str,
     pub(crate) env: &'a EnvironmentMap,
 }
 
@@ -52,11 +56,27 @@ impl TestCommand {
         // `CARGO_*` and `NEXTEST_*` variables set directly on `cmd` below.
         lctx.env.apply_env(&mut cmd);
 
+        if let Some(out_dir) = lctx
+            .rust_build_meta
+            .build_script_out_dirs
+            .get(package.id().repr())
+        {
+            // Convert the output directory to an absolute path.
+            let out_dir = lctx.rust_build_meta.target_directory.join(out_dir);
+            cmd.env("OUT_DIR", &out_dir);
+
+            // Apply the user-provided environment variables from the build script. This is
+            // supported by cargo test, but discouraged.
+            apply_build_script_env(&mut cmd, &out_dir);
+        }
+
         cmd.current_dir(cwd)
             // This environment variable is set to indicate that tests are being run under nextest.
             .env("NEXTEST", "1")
             // This environment variable is set to indicate that each test is being run in its own process.
             .env("NEXTEST_EXECUTION_MODE", "process-per-test")
+            // Set the nextest profile.
+            .env("NEXTEST_PROFILE", lctx.profile_name)
             .env(
                 "CARGO_MANIFEST_DIR",
                 // CARGO_MANIFEST_DIR is set to the *new* cwd after path mapping.
@@ -66,16 +86,6 @@ impl TestCommand {
         apply_package_env(&mut cmd, package);
 
         apply_ld_dyld_env(&mut cmd, lctx.dylib_path);
-
-        if let Some(out_dir) = lctx
-            .rust_build_meta
-            .build_script_out_dirs
-            .get(package.id().repr())
-        {
-            // Convert the output directory to an absolute path.
-            let out_dir = lctx.rust_build_meta.target_directory.join(out_dir);
-            cmd.env("OUT_DIR", out_dir);
-        }
 
         // Expose paths to non-test binaries at runtime so that relocated paths work.
         // These paths aren't exposed by Cargo at runtime, so use a NEXTEST_BIN_EXE prefix.
@@ -130,7 +140,7 @@ where
     let cmd = if let Some(current_exe) = double_spawn.current_exe() {
         let mut cmd = std::process::Command::new(current_exe);
         cmd.args([DoubleSpawnInfo::SUBCOMMAND_NAME, "--", program.as_str()]);
-        cmd.arg(&shell_words::join(args));
+        cmd.arg(shell_words::join(args));
         cmd
     } else {
         let mut cmd = std::process::Command::new(program);
@@ -142,53 +152,96 @@ where
 }
 
 fn apply_package_env(cmd: &mut std::process::Command, package: &PackageMetadata<'_>) {
-    cmd.env(
-        "__NEXTEST_ORIGINAL_CARGO_MANIFEST_DIR",
-        // This is a test-only environment variable set to the *old* cwd. Not part of the
-        // public API.
-        package.manifest_path().parent().unwrap(),
-    )
     // These environment variables are set at runtime by cargo test:
     // https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-crates
-    .env("CARGO_PKG_VERSION", format!("{}", package.version()))
-    .env(
-        "CARGO_PKG_VERSION_MAJOR",
-        format!("{}", package.version().major),
-    )
-    .env(
-        "CARGO_PKG_VERSION_MINOR",
-        format!("{}", package.version().minor),
-    )
-    .env(
-        "CARGO_PKG_VERSION_PATCH",
-        format!("{}", package.version().patch),
-    )
-    .env(
-        "CARGO_PKG_VERSION_PRE",
-        format!("{}", package.version().pre),
-    )
-    .env("CARGO_PKG_AUTHORS", package.authors().join(":"))
-    .env("CARGO_PKG_NAME", package.name())
-    .env(
-        "CARGO_PKG_DESCRIPTION",
-        package.description().unwrap_or_default(),
-    )
-    .env("CARGO_PKG_HOMEPAGE", package.homepage().unwrap_or_default())
-    .env("CARGO_PKG_LICENSE", package.license().unwrap_or_default())
-    .env(
-        "CARGO_PKG_LICENSE_FILE",
-        package.license_file().unwrap_or_else(|| "".as_ref()),
-    )
-    .env(
-        "CARGO_PKG_REPOSITORY",
-        package.repository().unwrap_or_default(),
-    )
-    .env(
-        "CARGO_PKG_RUST_VERSION",
-        package
-            .minimum_rust_version()
-            .map_or(String::new(), |v| v.to_string()),
+    cmd.env("CARGO_PKG_VERSION", format!("{}", package.version()))
+        .env(
+            "CARGO_PKG_VERSION_MAJOR",
+            format!("{}", package.version().major),
+        )
+        .env(
+            "CARGO_PKG_VERSION_MINOR",
+            format!("{}", package.version().minor),
+        )
+        .env(
+            "CARGO_PKG_VERSION_PATCH",
+            format!("{}", package.version().patch),
+        )
+        .env(
+            "CARGO_PKG_VERSION_PRE",
+            format!("{}", package.version().pre),
+        )
+        .env("CARGO_PKG_AUTHORS", package.authors().join(":"))
+        .env("CARGO_PKG_NAME", package.name())
+        .env(
+            "CARGO_PKG_DESCRIPTION",
+            package.description().unwrap_or_default(),
+        )
+        .env("CARGO_PKG_HOMEPAGE", package.homepage().unwrap_or_default())
+        .env("CARGO_PKG_LICENSE", package.license().unwrap_or_default())
+        .env(
+            "CARGO_PKG_LICENSE_FILE",
+            package.license_file().unwrap_or_else(|| "".as_ref()),
+        )
+        .env(
+            "CARGO_PKG_REPOSITORY",
+            package.repository().unwrap_or_default(),
+        )
+        .env(
+            "CARGO_PKG_RUST_VERSION",
+            package
+                .minimum_rust_version()
+                .map_or(String::new(), |v| v.to_string()),
+        );
+}
+
+/// Applies environment variables spcified by the build script via `cargo::rustc-env`
+fn apply_build_script_env(cmd: &mut std::process::Command, out_dir: &Utf8Path) {
+    let Some(out_dir_parent) = out_dir.parent() else {
+        warn!("could not determine parent directory of output directory {out_dir}");
+        return;
+    };
+    let Ok(out_file) = File::open(out_dir_parent.join("output")) else {
+        warn!("could not find build script output file at {out_dir_parent}/output");
+        return;
+    };
+    parse_build_script_output(
+        BufReader::new(out_file),
+        &out_dir_parent.join("output"),
+        |key, val| {
+            cmd.env(key, val);
+        },
     );
+}
+
+/// Parses the build script output and calls the callback for each key value pair of `VAR=val`
+///
+/// This is mainly split out into a separate function from [`apply_build_script_env`] for easier
+/// unit testing
+fn parse_build_script_output<R, Cb>(out_file: R, out_file_path: &Utf8Path, mut callback: Cb)
+where
+    R: BufRead,
+    Cb: FnMut(&str, &str),
+{
+    for line in out_file.lines() {
+        let Ok(line) = line else {
+            warn!("in build script output `{out_file_path}`, found line with invalid UTF-8");
+            continue;
+        };
+        // `cargo::rustc-env` is the official syntax since `cargo` 1.77, `cargo:rustc-env` is
+        // supported for backwards compatibility
+        let Some(key_val) = line
+            .strip_prefix("cargo::rustc-env=")
+            .or_else(|| line.strip_prefix("cargo:rustc-env="))
+        else {
+            continue;
+        };
+        let Some((k, v)) = key_val.split_once('=') else {
+            warn!("rustc-env variable '{key_val}' has no value in {out_file_path}, skipping");
+            continue;
+        };
+        callback(k, v);
+    }
 }
 
 /// This is a workaround for a macOS SIP issue:
@@ -213,7 +266,7 @@ pub(crate) fn apply_ld_dyld_env(cmd: &mut std::process::Command, dylib_path: &Os
         var.starts_with("LD_") || var.starts_with("DYLD_")
     }
 
-    static LD_DYLD_ENV_VARS: Lazy<HashMap<String, OsString>> = Lazy::new(|| {
+    static LD_DYLD_ENV_VARS: LazyLock<HashMap<String, OsString>> = LazyLock::new(|| {
         std::env::vars_os()
             .filter_map(|(k, v)| match k.into_string() {
                 Ok(k) => is_sip_sanitized(&k).then_some((k, v)),
@@ -234,5 +287,40 @@ pub(crate) fn apply_ld_dyld_env(cmd: &mut std::process::Command, dylib_path: &Os
     // Also add the dylib path envvar under the NEXTEST_ prefix.
     if is_sip_sanitized(dylib_path_envvar()) {
         cmd.env("NEXTEST_".to_owned() + dylib_path_envvar(), dylib_path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use indoc::indoc;
+
+    #[test]
+    fn parse_build_script() {
+        let out_file = indoc! {"
+            some_other_line
+            cargo::rustc-env=NEW_VAR=new_val
+            cargo:rustc-env=OLD_VAR=old_val
+            cargo::rustc-env=NEW_MISSING_VALUE
+            cargo:rustc-env=OLD_MISSING_VALUE
+            cargo:rustc-env=NEW_EMPTY_VALUE=
+        "};
+
+        let mut key_vals = Vec::new();
+        parse_build_script_output(
+            BufReader::new(std::io::Cursor::new(out_file)),
+            Utf8Path::new("<test input>"),
+            |key, val| key_vals.push((key.to_owned(), val.to_owned())),
+        );
+
+        assert_eq!(
+            key_vals,
+            vec![
+                ("NEW_VAR".to_owned(), "new_val".to_owned()),
+                ("OLD_VAR".to_owned(), "old_val".to_owned()),
+                ("NEW_EMPTY_VALUE".to_owned(), "".to_owned()),
+            ],
+            "parsed key-value pairs match"
+        );
     }
 }

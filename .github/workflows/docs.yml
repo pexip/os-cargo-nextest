@@ -1,10 +1,15 @@
 on:
   push:
     branches:
-      - master
+      - main
+  pull_request:
+    branches:
       - main
 
 name: Docs
+env:
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
 
 jobs:
   docs:
@@ -12,31 +17,29 @@ jobs:
     concurrency: ci-${{ github.ref }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84 # v2
-      - name: Install static-sitemap-cli
-        run: npm install static-sitemap-cli
-      - name: Build rustdoc
-        run: ./scripts/build-docs.sh
-      - name: Install mdbook
-        uses: taiki-e/install-action@4fedbddde88aab767a45a011661f832d68202716 # v2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
-          tool: mdbook@0.4
-      - name: Run mdbook
-        run: |
-          cd site
-          mdbook build
-      - name: Generate sitemap
-        run: |
-          cd site/output
-          npx sscli --base https://nexte.st
+          # The full history is required to make mkdocs' git-revision-date-localized plugin work
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2
+      - name: Install nextest for help text in docs
+        uses: taiki-e/install-action@nextest
+      - name: Install uv
+        uses: eifinger/setup-uv@1edb52594c857e2b5b13128931090f0640537287 # v5.3.0
+        with:
+          enable-cache: true
+      - name: Build rustdoc
+        run: ./scripts/build-rustdoc.sh
+      - name: Build site
+        run: ./scripts/build-site.sh
       - name: Organize
         run: |
           rm -rf target/gh-pages
           mv site/output target/gh-pages
           mv target/doc target/gh-pages/rustdoc
       - name: Publish
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: cloudflare/pages-action@1
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}

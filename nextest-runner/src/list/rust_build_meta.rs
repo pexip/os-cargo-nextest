@@ -15,6 +15,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
 };
+use tracing::warn;
 
 /// Rust-related metadata used for builds and test runs.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -123,7 +124,7 @@ impl RustBuildMeta<TestListState> {
             .map(|libdir| libdir.to_path_buf())
             .collect::<Vec<_>>();
         if libdirs.is_empty() {
-            log::warn!("failed to detect the rustc libdir, may fail to list or run tests");
+            warn!("failed to detect the rustc libdir, may fail to list or run tests");
         }
 
         // Cargo puts linked paths before base output directories.
@@ -214,7 +215,7 @@ mod tests {
         BuildPlatformsSummary, HostPlatformSummary, PlatformLibdirSummary,
         PlatformLibdirUnavailable,
     };
-    use target_spec::summaries::PlatformSummary;
+    use target_spec::{Platform, summaries::PlatformSummary};
     use test_case::test_case;
 
     impl Default for RustBuildMeta<BinaryListState> {
@@ -234,15 +235,19 @@ mod tests {
     }
 
     fn host_current() -> HostPlatform {
-        HostPlatform::current(PlatformLibdir::Unavailable(
-            PlatformLibdirUnavailable::OLD_SUMMARY,
-        ))
-        .expect("should detect the host platform successfully")
+        HostPlatform {
+            platform: Platform::build_target()
+                .expect("should detect the build target successfully"),
+            libdir: PlatformLibdir::Unavailable(PlatformLibdirUnavailable::OLD_SUMMARY),
+        }
     }
 
     fn host_current_with_libdir(libdir: &str) -> HostPlatform {
-        HostPlatform::current(PlatformLibdir::Available(libdir.into()))
-            .expect("should detect the host platform successfully")
+        HostPlatform {
+            platform: Platform::build_target()
+                .expect("should detect the build target successfully"),
+            libdir: PlatformLibdir::Available(libdir.into()),
+        }
     }
 
     fn host_not_current_with_libdir(libdir: &str) -> HostPlatform {
@@ -357,7 +362,10 @@ mod tests {
             ..Default::default()
         };
         let actual = RustBuildMeta::<BinaryListState>::from_summary(summary);
-        assert!(matches!(actual, Err(RustBuildMetaParseError::Unsupported { .. })), "Expect the parse result to be an error of RustBuildMetaParseError::Unsupported, actual {:?}", actual);
+        assert!(
+            matches!(actual, Err(RustBuildMetaParseError::Unsupported { .. })),
+            "Expect the parse result to be an error of RustBuildMetaParseError::Unsupported, actual {actual:?}"
+        );
     }
 
     #[test]
@@ -426,8 +434,7 @@ mod tests {
 
         let rust_build_meta = RustBuildMeta {
             build_platforms: BuildPlatforms {
-                host: HostPlatform::current(PlatformLibdir::Available(host_libdir.clone()))
-                    .expect("should detect the host platform successfully"),
+                host: host_current_with_libdir(host_libdir.as_ref()),
                 target: Some(TargetPlatform::new(
                     TargetTriple::x86_64_unknown_linux_gnu(),
                     PlatformLibdir::Available(target_libdir.clone()),
@@ -439,15 +446,11 @@ mod tests {
 
         assert!(
             dylib_paths.contains(&host_libdir),
-            "{:?} should contain {}",
-            dylib_paths,
-            host_libdir
+            "{dylib_paths:?} should contain {host_libdir}"
         );
         assert!(
             dylib_paths.contains(&target_libdir),
-            "{:?} should contain {}",
-            dylib_paths,
-            target_libdir
+            "{dylib_paths:?} should contain {target_libdir}"
         );
     }
 
@@ -470,8 +473,7 @@ mod tests {
             linked_paths: [(Utf8PathBuf::from(tmpdir_dirname), Default::default())].into(),
             base_output_directories: [Utf8PathBuf::from(tmpdir_dirname)].into(),
             build_platforms: BuildPlatforms {
-                host: HostPlatform::current(PlatformLibdir::Available(host_libdir.clone()))
-                    .expect("should detect the host platform successfully"),
+                host: host_current_with_libdir(host_libdir.as_ref()),
                 target: Some(TargetPlatform::new(
                     TargetTriple::x86_64_unknown_linux_gnu(),
                     PlatformLibdir::Available(target_libdir.clone()),
@@ -483,8 +485,7 @@ mod tests {
 
         assert!(
             dylib_paths.clone().into_iter().all_unique(),
-            "{:?} should not contain duplicate paths",
-            dylib_paths
+            "{dylib_paths:?} should not contain duplicate paths"
         );
     }
 }

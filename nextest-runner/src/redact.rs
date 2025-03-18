@@ -6,16 +6,20 @@
 //! Used for snapshot testing.
 
 use crate::{
-    helpers::{convert_rel_path_to_forward_slash, FormattedDuration},
+    helpers::{FormattedDuration, convert_rel_path_to_forward_slash},
     list::RustBuildMeta,
 };
 use camino::{Utf8Path, Utf8PathBuf};
-use once_cell::sync::Lazy;
 use regex::Regex;
-use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
-static CRATE_NAME_HASH_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^([a-zA-Z0-9_-]+)-[a-f0-9]{16}$").unwrap());
+static CRATE_NAME_HASH_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^([a-zA-Z0-9_-]+)-[a-f0-9]{16}$").unwrap());
 static TARGET_DIR_REDACTION: &str = "<target-dir>";
 static FILE_COUNT_REDACTION: &str = "<file-count>";
 static DURATION_REDACTION: &str = "<duration>";
@@ -54,7 +58,7 @@ impl Redactor {
         for (source, replacement) in linked_path_redactions {
             redactions.push(Redaction::Path {
                 path: build_meta.target_directory.join(&source),
-                replacement: format!("{}/{}", TARGET_DIR_REDACTION, replacement),
+                replacement: format!("{TARGET_DIR_REDACTION}/{replacement}"),
             });
             redactions.push(Redaction::Path {
                 path: source,
@@ -83,7 +87,7 @@ impl Redactor {
                         } else {
                             // Always use "/" as the separator, even on Windows, to ensure stable
                             // output across OSes.
-                            let path = Utf8PathBuf::from(format!("{}/{}", replacement, suffix));
+                            let path = Utf8PathBuf::from(format!("{replacement}/{suffix}"));
                             return RedactorOutput::Redacted(
                                 convert_rel_path_to_forward_slash(&path).into(),
                             );
@@ -180,10 +184,8 @@ impl RedactorKind {
 }
 
 /// An individual redaction to apply.
-///
-/// Accepted by [`Redactor::new`].
 #[derive(Debug)]
-pub enum Redaction {
+enum Redaction {
     /// Redact a path.
     Path {
         /// The path to redact.

@@ -4,25 +4,25 @@
 use super::{ArchiveCounts, ArchiveEvent, BINARIES_METADATA_FILE_NAME, CARGO_METADATA_FILE_NAME};
 use crate::{
     config::{
-        get_num_cpus, ArchiveConfig, ArchiveIncludeOnMissing, FinalConfig, NextestProfile,
-        RecursionDepth,
+        ArchiveConfig, ArchiveIncludeOnMissing, EvaluatableProfile, RecursionDepth, get_num_cpus,
     },
     errors::{ArchiveCreateError, UnknownArchiveFormat},
     helpers::{convert_rel_path_to_forward_slash, rel_path_join},
     list::{BinaryList, OutputFormat, SerializableFormat},
     redact::Redactor,
-    reuse_build::{PathMapper, LIBDIRS_BASE_DIR},
+    reuse_build::{LIBDIRS_BASE_DIR, PathMapper},
 };
 use atomicwrites::{AtomicFile, OverwriteBehavior};
 use camino::{Utf8Path, Utf8PathBuf};
 use core::fmt;
-use guppy::{graph::PackageGraph, PackageId};
+use guppy::{PackageId, graph::PackageGraph};
 use std::{
     collections::HashSet,
     fs,
     io::{self, BufWriter, Write},
     time::{Instant, SystemTime},
 };
+use tracing::{debug, trace, warn};
 use zstd::Encoder;
 
 /// Archive format.
@@ -56,9 +56,9 @@ impl ArchiveFormat {
 /// Archives test binaries along with metadata to the given file.
 ///
 /// The output file is a Zstandard-compressed tarball (`.tar.zst`).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn archive_to_file<'a, F>(
-    profile: NextestProfile<'a, FinalConfig>,
+    profile: EvaluatableProfile<'a>,
     binary_list: &'a BinaryList,
     cargo_metadata: &'a str,
     graph: &'a PackageGraph,
@@ -195,7 +195,7 @@ struct Archiver<'a, W: Write> {
 }
 
 impl<'a, W: Write> Archiver<'a, W> {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn new(
         config: &'a ArchiveConfig,
         binary_list: &'a BinaryList,
@@ -217,9 +217,12 @@ impl<'a, W: Write> Archiver<'a, W> {
                 encoder
                     .include_checksum(true)
                     .map_err(ArchiveCreateError::OutputArchiveIo)?;
-                encoder
-                    .multithread(get_num_cpus() as u32)
-                    .map_err(ArchiveCreateError::OutputArchiveIo)?;
+                if let Err(err) = encoder.multithread(get_num_cpus() as u32) {
+                    tracing::warn!(
+                        ?err,
+                        "libzstd compiled without multithreading, defaulting to single-thread"
+                    );
+                }
                 tar::Builder::new(encoder)
             }
         };
@@ -393,6 +396,25 @@ impl<'a, W: Write> Archiver<'a, W> {
                 false,
                 callback,
             )?;
+
+            // Archive build script output in order to set environment variables from there
+            let Some(out_dir_parent) = build_script_out_dir.parent() else {
+                warn!(
+                    "could not determine parent directory of output directory {build_script_out_dir}"
+                );
+                continue;
+            };
+            let out_file_path = out_dir_parent.join("output");
+            let src_path = self
+                .binary_list
+                .rust_build_meta
+                .target_directory
+                .join(&out_file_path);
+
+            let rel_path = Utf8Path::new("target").join(out_file_path);
+            let rel_path = convert_rel_path_to_forward_slash(&rel_path);
+
+            self.append_file(ArchiveStep::BuildScriptOutDirs, &src_path, &rel_path)?;
         }
 
         // Write linked paths to the archive.
@@ -547,7 +569,7 @@ impl<'a, W: Write> Archiver<'a, W> {
         let mut stack = vec![(limit, src_path.to_owned(), rel_path.to_owned(), metadata)];
 
         while let Some((depth, src_path, rel_path, metadata)) = stack.pop() {
-            log::trace!(
+            trace!(
                 target: "nextest-runner",
                 "processing `{src_path}` with metadata {metadata:?} \
                  (depth: {depth})",
@@ -567,7 +589,7 @@ impl<'a, W: Write> Archiver<'a, W> {
                 }
 
                 // Iterate over this directory.
-                log::debug!(
+                debug!(
                     target: "nextest-runner",
                     "recursing into `{}`",
                     src_path
@@ -625,7 +647,7 @@ impl<'a, W: Write> Archiver<'a, W> {
     ) -> Result<(), ArchiveCreateError> {
         // Check added_files to ensure we aren't adding duplicate files.
         if !self.added_files.contains(dest) {
-            log::debug!(
+            debug!(
                 target: "nextest-runner",
                 "adding `{src}` to archive as `{dest}`",
             );

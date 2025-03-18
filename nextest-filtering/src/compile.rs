@@ -2,33 +2,57 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::{
-    errors::ParseSingleError,
+    errors::{BannedPredicateReason, ParseSingleError},
     expression::*,
     parsing::{ParsedExpr, SetDef},
 };
 use guppy::{
-    graph::{DependsCache, PackageGraph, PackageMetadata},
     PackageId,
+    graph::{DependsCache, PackageMetadata},
 };
 use miette::SourceSpan;
+use recursion::CollapsibleExt;
+use smol_str::SmolStr;
 use std::collections::HashSet;
 
 pub(crate) fn compile(
     expr: &ParsedExpr,
-    graph: &PackageGraph,
+    cx: &ParseContext<'_>,
+    kind: FiltersetKind,
 ) -> Result<CompiledExpr, Vec<ParseSingleError>> {
-    let in_workspace_packages: Vec<_> = graph
-        .resolve_workspace()
-        .packages(guppy::graph::DependencyDirection::Forward)
-        .collect();
-    let mut cache = graph.new_depends_cache();
     let mut errors = vec![];
-    let expr = compile_expr(expr, &in_workspace_packages, &mut cache, &mut errors);
+    check_banned_predicates(expr, kind, &mut errors);
+
+    let cx_cache = cx.make_cache();
+    let mut cache = cx.graph().new_depends_cache();
+    let expr = compile_expr(expr, cx_cache, &mut cache, &mut errors);
 
     if errors.is_empty() {
         Ok(expr)
     } else {
         Err(errors)
+    }
+}
+
+fn check_banned_predicates(
+    expr: &ParsedExpr,
+    kind: FiltersetKind,
+    errors: &mut Vec<ParseSingleError>,
+) {
+    match kind {
+        FiltersetKind::Test => {}
+        FiltersetKind::DefaultFilter => {
+            // The `default` predicate is banned.
+            Wrapped(expr).collapse_frames(|layer: ExprFrame<&SetDef, ()>| {
+                if let ExprFrame::Set(SetDef::Default(span)) = layer {
+                    errors.push(ParseSingleError::BannedPredicate {
+                        kind,
+                        span: *span,
+                        reason: BannedPredicateReason::InfiniteRecursion,
+                    });
+                }
+            })
+        }
     }
 }
 
@@ -87,37 +111,44 @@ fn rdependencies_packages(
 
 fn compile_set_def(
     set: &SetDef,
-    packages: &[PackageMetadata<'_>],
+    cx_cache: &ParseContextCache<'_>,
     cache: &mut DependsCache<'_>,
     errors: &mut Vec<ParseSingleError>,
-) -> FilteringSet {
+) -> FiltersetLeaf {
     match set {
-        SetDef::Package(matcher, span) => FilteringSet::Packages(expect_non_empty(
-            matching_packages(matcher, packages),
+        SetDef::Package(matcher, span) => FiltersetLeaf::Packages(expect_non_empty_packages(
+            matching_packages(matcher, &cx_cache.workspace_packages),
             *span,
             errors,
         )),
-        SetDef::Deps(matcher, span) => FilteringSet::Packages(expect_non_empty(
-            dependencies_packages(matcher, packages, cache),
+        SetDef::Deps(matcher, span) => FiltersetLeaf::Packages(expect_non_empty_packages(
+            dependencies_packages(matcher, &cx_cache.workspace_packages, cache),
             *span,
             errors,
         )),
-        SetDef::Rdeps(matcher, span) => FilteringSet::Packages(expect_non_empty(
-            rdependencies_packages(matcher, packages, cache),
+        SetDef::Rdeps(matcher, span) => FiltersetLeaf::Packages(expect_non_empty_packages(
+            rdependencies_packages(matcher, &cx_cache.workspace_packages, cache),
             *span,
             errors,
         )),
-        SetDef::Kind(matcher, span) => FilteringSet::Kind(matcher.clone(), *span),
-        SetDef::Binary(matcher, span) => FilteringSet::Binary(matcher.clone(), *span),
-        SetDef::BinaryId(matcher, span) => FilteringSet::BinaryId(matcher.clone(), *span),
-        SetDef::Platform(platform, span) => FilteringSet::Platform(*platform, *span),
-        SetDef::Test(matcher, span) => FilteringSet::Test(matcher.clone(), *span),
-        SetDef::All => FilteringSet::All,
-        SetDef::None => FilteringSet::None,
+        SetDef::Kind(matcher, span) => FiltersetLeaf::Kind(matcher.clone(), *span),
+        SetDef::Binary(matcher, span) => FiltersetLeaf::Binary(
+            expect_non_empty_binary_names(matcher, &cx_cache.binary_names, *span, errors),
+            *span,
+        ),
+        SetDef::BinaryId(matcher, span) => FiltersetLeaf::BinaryId(
+            expect_non_empty_binary_ids(matcher, &cx_cache.binary_ids, *span, errors),
+            *span,
+        ),
+        SetDef::Platform(platform, span) => FiltersetLeaf::Platform(*platform, *span),
+        SetDef::Test(matcher, span) => FiltersetLeaf::Test(matcher.clone(), *span),
+        SetDef::Default(_) => FiltersetLeaf::Default,
+        SetDef::All => FiltersetLeaf::All,
+        SetDef::None => FiltersetLeaf::None,
     }
 }
 
-fn expect_non_empty(
+fn expect_non_empty_packages(
     packages: HashSet<PackageId>,
     span: SourceSpan,
     errors: &mut Vec<ParseSingleError>,
@@ -128,17 +159,60 @@ fn expect_non_empty(
     packages
 }
 
+fn expect_non_empty_binary_names(
+    matcher: &NameMatcher,
+    all_binary_names: &HashSet<&str>,
+    span: SourceSpan,
+    errors: &mut Vec<ParseSingleError>,
+) -> NameMatcher {
+    let any_matches = match matcher {
+        NameMatcher::Equal { value, .. } => all_binary_names.contains(value.as_str()),
+        _ => {
+            // For anything more complex than equals, iterate over all the binary names.
+            all_binary_names
+                .iter()
+                .any(|binary_name| matcher.is_match(binary_name))
+        }
+    };
+
+    if !any_matches {
+        errors.push(ParseSingleError::NoBinaryNameMatch(span));
+    }
+    matcher.clone()
+}
+
+fn expect_non_empty_binary_ids(
+    matcher: &NameMatcher,
+    all_binary_ids: &HashSet<SmolStr>,
+    span: SourceSpan,
+    errors: &mut Vec<ParseSingleError>,
+) -> NameMatcher {
+    let any_matches = match matcher {
+        NameMatcher::Equal { value, .. } => all_binary_ids.contains(value.as_str()),
+        _ => {
+            // For anything more complex than equals, iterate over all the binary IDs.
+            all_binary_ids
+                .iter()
+                .any(|binary_id| matcher.is_match(binary_id))
+        }
+    };
+
+    if !any_matches {
+        errors.push(ParseSingleError::NoBinaryIdMatch(span));
+    }
+    matcher.clone()
+}
+
 fn compile_expr(
     expr: &ParsedExpr,
-    packages: &[PackageMetadata<'_>],
+    cx_cache: &ParseContextCache<'_>,
     cache: &mut DependsCache<'_>,
     errors: &mut Vec<ParseSingleError>,
 ) -> CompiledExpr {
     use crate::expression::ExprFrame::*;
-    use recursion::CollapsibleExt;
 
     Wrapped(expr).collapse_frames(|layer: ExprFrame<&SetDef, CompiledExpr>| match layer {
-        Set(set) => CompiledExpr::Set(compile_set_def(set, packages, cache, errors)),
+        Set(set) => CompiledExpr::Set(compile_set_def(set, cx_cache, cache, errors)),
         Not(expr) => CompiledExpr::Not(Box::new(expr)),
         Union(expr_1, expr_2) => CompiledExpr::Union(Box::new(expr_1), Box::new(expr_2)),
         Intersection(expr_1, expr_2) => {

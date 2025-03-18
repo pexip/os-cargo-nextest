@@ -3,8 +3,8 @@
 
 use super::TrackDefault;
 use crate::config::helpers::deserialize_relative_path;
-use camino::{Utf8Path, Utf8PathBuf};
-use serde::{de::Unexpected, Deserialize};
+use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
+use serde::{Deserialize, de::Unexpected};
 use std::fmt;
 
 /// Configuration for archives.
@@ -49,7 +49,7 @@ impl ArchiveInclude {
     /// Join the path with the given target dir.
     pub fn join_path(&self, target_dir: &Utf8Path) -> Utf8PathBuf {
         match self.relative_to {
-            ArchiveRelativeTo::Target => target_dir.join(&self.path),
+            ArchiveRelativeTo::Target => join_rel_path(target_dir, &self.path),
         }
     }
 
@@ -66,6 +66,27 @@ fn default_depth() -> TrackDefault<RecursionDepth> {
 
 fn default_on_missing() -> ArchiveIncludeOnMissing {
     ArchiveIncludeOnMissing::Warn
+}
+
+fn join_rel_path(a: &Utf8Path, rel: &Utf8Path) -> Utf8PathBuf {
+    // This joins the subset of components that deserialize_relative_path
+    // allows. We also always use "/" to ensure consistency across platforms.
+    let mut out = String::from(a.to_owned());
+
+    for component in rel.components() {
+        match component {
+            Utf8Component::CurDir => {}
+            Utf8Component::Normal(p) => {
+                out.push('/');
+                out.push_str(p);
+            }
+            other => unreachable!(
+                "found invalid component {other:?}, deserialize_relative_path should have errored"
+            ),
+        }
+    }
+
+    out.into()
 }
 
 /// What to do when an archive-include path is missing.
@@ -88,7 +109,7 @@ impl<'de> Deserialize<'de> for ArchiveIncludeOnMissing {
     {
         struct ArchiveIncludeOnMissingVisitor;
 
-        impl<'de> serde::de::Visitor<'de> for ArchiveIncludeOnMissingVisitor {
+        impl serde::de::Visitor<'_> for ArchiveIncludeOnMissingVisitor {
             type Value = ArchiveIncludeOnMissing;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -161,7 +182,7 @@ impl RecursionDepth {
 impl fmt::Display for RecursionDepth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Finite(n) => write!(f, "{}", n),
+            Self::Finite(n) => write!(f, "{n}"),
             Self::Infinite => write!(f, "infinite"),
         }
     }
@@ -174,7 +195,7 @@ impl<'de> Deserialize<'de> for RecursionDepth {
     {
         struct RecursionDepthVisitor;
 
-        impl<'de> serde::de::Visitor<'de> for RecursionDepthVisitor {
+        impl serde::de::Visitor<'_> for RecursionDepthVisitor {
             type Value = RecursionDepth;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -218,8 +239,8 @@ mod tests {
     use super::*;
     use crate::{
         config::{
-            test_helpers::{build_platforms, temp_workspace},
             NextestConfig,
+            test_helpers::{build_platforms, temp_workspace},
         },
         errors::ConfigParseErrorKind,
     };
@@ -227,6 +248,7 @@ mod tests {
     use camino_tempfile::tempdir;
     use config::ConfigError;
     use indoc::indoc;
+    use nextest_filtering::ParseContext;
     use test_case::test_case;
 
     #[test]
@@ -253,9 +275,11 @@ mod tests {
 
         let graph = temp_workspace(workspace_dir.path(), config_contents);
 
+        let pcx = ParseContext::new(&graph);
+
         let config = NextestConfig::from_sources(
             graph.workspace().root(),
-            &graph,
+            &pcx,
             None,
             [],
             &Default::default(),
@@ -332,7 +356,7 @@ mod tests {
             [profile.default]
             archive.include = { path = "foo", relative-to = "target" }
         "#},
-        r#"invalid type: map, expected a sequence"#
+        r"invalid type: map, expected a sequence"
         ; "missing list")]
     #[test_case(
         indoc!{r#"
@@ -341,7 +365,7 @@ mod tests {
                 { path = "foo" }
             ]
         "#},
-        r#"missing field `relative-to`"#
+        r"missing field `relative-to`"
         ; "missing relative-to")]
     #[test_case(
         indoc!{r#"
@@ -350,7 +374,7 @@ mod tests {
                 { path = "bar", relative-to = "unknown" }
             ]
         "#},
-        r#"enum ArchiveRelativeTo does not have variant constructor unknown"#
+        r"enum ArchiveRelativeTo does not have variant constructor unknown"
         ; "invalid relative-to")]
     #[test_case(
         indoc!{r#"
@@ -403,9 +427,11 @@ mod tests {
 
         let graph = temp_workspace(workspace_path, config_contents);
 
+        let pcx = ParseContext::new(&graph);
+
         let config_err = NextestConfig::from_sources(
             graph.workspace().root(),
-            &graph,
+            &pcx,
             None,
             [],
             &Default::default(),
@@ -416,7 +442,9 @@ mod tests {
             ConfigParseErrorKind::DeserializeError(path_error) => match path_error.inner() {
                 ConfigError::Message(message) => message,
                 other => {
-                    panic!("for config error {config_err:?}, expected ConfigError::Message for inner error {other:?}");
+                    panic!(
+                        "for config error {config_err:?}, expected ConfigError::Message for inner error {other:?}"
+                    );
                 }
             },
             other => {
@@ -430,5 +458,23 @@ mod tests {
             message.contains(expected_message),
             "expected message: {expected_message}\nactual message: {message}"
         );
+    }
+
+    #[test]
+    fn test_join_rel_path() {
+        let inputs = [
+            ("a", "b", "a/b"),
+            ("a", "b/c", "a/b/c"),
+            ("a", "", "a"),
+            ("a", ".", "a"),
+        ];
+
+        for (base, rel, expected) in inputs {
+            assert_eq!(
+                join_rel_path(Utf8Path::new(base), Utf8Path::new(rel)),
+                Utf8Path::new(expected),
+                "actual matches expected -- base: {base}, rel: {rel}"
+            );
+        }
     }
 }

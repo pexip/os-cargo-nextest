@@ -11,16 +11,16 @@ jobs:
     if: github.repository_owner == 'nextest-rs' && startsWith(github.ref_name, 'nextest-filtering-')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo release
-        uses: taiki-e/install-action@4fedbddde88aab767a45a011661f832d68202716 # v2
+        uses: taiki-e/install-action@ae97ff9daf1cd2e216671a047d80ff48461e30bb # v2
         with:
           tool: cargo-release@0.25.0
-      - uses: taiki-e/create-gh-release-action@72d65cee1f8033ef0c8b5d79eaf0c45c7c578ce3 # v1
+      - uses: taiki-e/create-gh-release-action@b7abb0cf5e72cb5500307b577f9ca3fd4c5be9d2 # v1
         with:
           prefix: nextest-filtering
           changelog: nextest-filtering/CHANGELOG.md
@@ -28,7 +28,7 @@ jobs:
           branch: main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: ./scripts/cargo-release-publish.sh --exclude cargo-nextest
+      - run: ./scripts/cargo-release-publish.sh
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -36,16 +36,16 @@ jobs:
     if: github.repository_owner == 'nextest-rs' && startsWith(github.ref_name, 'nextest-metadata-')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo release
-        uses: taiki-e/install-action@4fedbddde88aab767a45a011661f832d68202716 # v2
+        uses: taiki-e/install-action@ae97ff9daf1cd2e216671a047d80ff48461e30bb # v2
         with:
           tool: cargo-release@0.25.0
-      - uses: taiki-e/create-gh-release-action@72d65cee1f8033ef0c8b5d79eaf0c45c7c578ce3 # v1
+      - uses: taiki-e/create-gh-release-action@b7abb0cf5e72cb5500307b577f9ca3fd4c5be9d2 # v1
         with:
           prefix: nextest-metadata
           changelog: nextest-metadata/CHANGELOG.md
@@ -53,7 +53,7 @@ jobs:
           branch: main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: ./scripts/cargo-release-publish.sh --exclude cargo-nextest
+      - run: ./scripts/cargo-release-publish.sh
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -61,16 +61,16 @@ jobs:
     if: github.repository_owner == 'nextest-rs' && startsWith(github.ref_name, 'nextest-runner-')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo release
-        uses: taiki-e/install-action@4fedbddde88aab767a45a011661f832d68202716 # v2
+        uses: taiki-e/install-action@ae97ff9daf1cd2e216671a047d80ff48461e30bb # v2
         with:
           tool: cargo-release@0.25.0
-      - uses: taiki-e/create-gh-release-action@72d65cee1f8033ef0c8b5d79eaf0c45c7c578ce3 # v1
+      - uses: taiki-e/create-gh-release-action@b7abb0cf5e72cb5500307b577f9ca3fd4c5be9d2 # v1
         with:
           prefix: nextest-runner
           changelog: nextest-runner/CHANGELOG.md
@@ -78,7 +78,7 @@ jobs:
           branch: main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: ./scripts/cargo-release-publish.sh --exclude cargo-nextest
+      - run: ./scripts/cargo-release-publish.sh
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -86,17 +86,17 @@ jobs:
     if: github.repository_owner == 'nextest-rs' && startsWith(github.ref_name, 'cargo-nextest-')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
       # Note: do not publish this until binaries are built and uploaded below. This is so that
       # `cargo binstall` keeps working.
-      - uses: taiki-e/create-gh-release-action@72d65cee1f8033ef0c8b5d79eaf0c45c7c578ce3 # v1
+      - uses: taiki-e/create-gh-release-action@b7abb0cf5e72cb5500307b577f9ca3fd4c5be9d2 # v1
         id: create-gh-release
         with:
           prefix: cargo-nextest
           # The changelog for cargo-nextest is hosted on the website
-          changelog: site/src/CHANGELOG.md
+          changelog: site/src/changelog.md
           title: $prefix $version
           branch: main
         env:
@@ -161,10 +161,14 @@ jobs:
             build-tool: cross
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/upload-rust-binary-action@116e64492098f73785ffb2cf4c498df22c85e7a5 # v1.20.0
+      - name: Install b2sum on macOS
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          brew install b2sum
+      - uses: taiki-e/upload-rust-binary-action@e7953b6078194a4ae5f5619632e3715db6275561 # v1.24.0
         with:
           bin: cargo-nextest
           # The tag name contains the binary name so just use that.
@@ -173,6 +177,7 @@ jobs:
           target: ${{ matrix.build-target }}
           tar: all
           zip: windows
+          checksum: b2,sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_PROFILE_RELEASE_LTO: true
@@ -208,11 +213,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Clone nextest repository
-        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           path: nextest
       - name: Clone release-meta repository
-        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           repository: nextest-rs/release-meta
           ref: main
@@ -222,13 +227,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo release
-        uses: taiki-e/install-action@4fedbddde88aab767a45a011661f832d68202716 # v2
+        uses: taiki-e/install-action@ae97ff9daf1cd2e216671a047d80ff48461e30bb # v2
         with:
           tool: cargo-release@0.25.0
       - name: Download mukti
         run: |
           mkdir -p ~/bin
-          curl -LsSf "https://github.com/nextest-rs/mukti/releases/download/mukti-bin-0.7.4/mukti-bin-0.7.4-x86_64-unknown-linux-musl.tar.gz" \
+          curl -LsSf "https://github.com/nextest-rs/mukti/releases/download/mukti-bin-0.7.8/mukti-bin-0.7.8-x86_64-unknown-linux-musl.tar.gz" \
             | tar xzf - -C ~/bin
       - name: Add release metadata
         run: |
@@ -276,6 +281,6 @@ jobs:
       - name: Run cargo-release-publish.sh
         run: |
           cd nextest
-          ./scripts/cargo-release-publish.sh
+          PUBLISH_CARGO_NEXTEST=1 ./scripts/cargo-release-publish.sh
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

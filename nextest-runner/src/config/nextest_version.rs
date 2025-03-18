@@ -259,7 +259,7 @@ impl fmt::Display for ConfigExperimental {
     }
 }
 
-/// Specification for a nextest version. Part of [`NextestVersion`].
+/// Specification for a nextest version. Part of [`NextestVersionConfig`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub enum NextestVersionReq {
     /// A version was specified.
@@ -313,9 +313,9 @@ impl NextestVersionReq {
     }
 }
 
-/// The result of checking whether a [`NextestVersion`] satisfies a requirement.
+/// The result of checking whether a [`NextestVersionConfig`] satisfies a requirement.
 ///
-/// Returned by [`NextestVersion::eval`].
+/// Returned by [`NextestVersionConfig::eval`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NextestVersionEval {
     /// The version satisfies the requirement.
@@ -425,8 +425,7 @@ impl<'de> Deserialize<'de> for NextestVersionDeserialize {
                 if let (Some(required), Some(recommended)) = (&required, &recommended) {
                     if required > recommended {
                         return Err(serde::de::Error::custom(format!(
-                            "required version ({}) must not be greater than recommended version ({})",
-                            required, recommended
+                            "required version ({required}) must not be greater than recommended version ({recommended})"
                         )));
                     }
                 }
@@ -480,16 +479,6 @@ where
     }
 
     Version::parse(&s).map_err(E::custom)
-}
-
-/// The mode to use when checking the nextest version: whether to produce an error or a warning.
-#[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum NextestVersionMode {
-    /// Produce an error if the nextest version is not at least the specified version.
-    Error,
-    /// Only produce a warning if the nextest version is not at least the specified version.
-    Warning,
 }
 
 #[cfg(test)]
@@ -557,9 +546,7 @@ mod tests {
         let err = toml::from_str::<VersionOnlyDeserialize>(input).unwrap_err();
         assert!(
             err.to_string().contains(error_message),
-            "error `{}` contains `{}`",
-            err,
-            error_message
+            "error `{err}` contains `{error_message}`"
         );
     }
 

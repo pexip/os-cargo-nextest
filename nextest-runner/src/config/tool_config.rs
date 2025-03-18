@@ -57,12 +57,12 @@ impl FromStr for ToolConfigFile {
 mod tests {
     use super::*;
     use crate::config::{
-        test_helpers::*, NextestConfig, NextestVersionConfig, NextestVersionReq, RetryPolicy,
-        TestGroup, VersionOnlyConfig,
+        NextestConfig, NextestVersionConfig, NextestVersionReq, RetryPolicy, TestGroup,
+        VersionOnlyConfig, test_helpers::*,
     };
     use camino_tempfile::tempdir;
     use guppy::graph::cargo::BuildPlatform;
-    use nextest_filtering::TestQuery;
+    use nextest_filtering::{ParseContext, TestQuery};
 
     #[test]
     fn parse_tool_config_file() {
@@ -208,9 +208,10 @@ mod tests {
             },
         );
 
+        let pcx = ParseContext::new(&graph);
         let config = NextestConfig::from_sources(
             workspace_root,
-            &graph,
+            &pcx,
             None,
             &tool_config_files,
             &Default::default(),

@@ -1,7 +1,7 @@
 // Copyright (c) The nextest Contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Parsing for filtering expressions
+//! Parsing for filtersets.
 //!
 //! The parsing strategy is based on the following blog post:
 //! `<https://eyalkalderon.com/blog/nom-error-recovery/>`
@@ -17,31 +17,31 @@ use guppy::graph::cargo::BuildPlatform;
 use miette::SourceSpan;
 use std::fmt;
 use winnow::{
+    LocatingSlice, ModalParser, Parser,
     ascii::line_ending,
     combinator::{alt, delimited, eof, peek, preceded, repeat, terminated, trace},
     stream::{Location, SliceLen, Stream},
     token::{literal, take_till},
-    Parser,
 };
 
 mod glob;
 mod unicode_string;
-use crate::{errors::*, NameMatcher};
+use crate::{NameMatcher, errors::*};
 pub(crate) use glob::GenericGlob;
 pub(crate) use unicode_string::DisplayParsedString;
 
-pub(crate) type Span<'a> = winnow::Stateful<winnow::Located<&'a str>, State<'a>>;
+pub(crate) type Span<'a> = winnow::Stateful<LocatingSlice<&'a str>, State<'a>>;
 type Error = ();
-type PResult<T> = winnow::PResult<T, Error>;
+type PResult<T> = winnow::ModalResult<T, Error>;
 
 pub(crate) fn new_span<'a>(input: &'a str, errors: &'a mut Vec<ParseSingleError>) -> Span<'a> {
     Span {
-        input: winnow::Located::new(input),
+        input: LocatingSlice::new(input),
         state: State::new(errors),
     }
 }
 
-/// A filter expression that hasn't been compiled against a package graph.
+/// A filterset that hasn't been compiled against a package graph.
 ///
 /// Not part of the public API. Exposed for testing only.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,11 +55,13 @@ pub enum SetDef<S = SourceSpan> {
     BinaryId(NameMatcher, S),
     Platform(BuildPlatform, S),
     Test(NameMatcher, S),
+    Default(S),
     All,
     None,
 }
 
 impl SetDef {
+    #[cfg(test)]
     fn drop_source_span(self) -> SetDef<()> {
         match self {
             Self::Package(matcher, _) => SetDef::Package(matcher, ()),
@@ -70,6 +72,7 @@ impl SetDef {
             Self::BinaryId(matcher, _) => SetDef::BinaryId(matcher, ()),
             Self::Platform(platform, _) => SetDef::Platform(platform, ()),
             Self::Test(matcher, _) => SetDef::Test(matcher, ()),
+            Self::Default(_) => SetDef::Default(()),
             Self::All => SetDef::All,
             Self::None => SetDef::None,
         }
@@ -87,13 +90,14 @@ impl<S> fmt::Display for SetDef<S> {
             Self::BinaryId(matcher, _) => write!(f, "binary_id({matcher})"),
             Self::Platform(platform, _) => write!(f, "platform({platform})"),
             Self::Test(matcher, _) => write!(f, "test({matcher})"),
+            Self::Default(_) => write!(f, "default()"),
             Self::All => write!(f, "all()"),
             Self::None => write!(f, "none()"),
         }
     }
 }
 
-/// A filter expression that hasn't been compiled against a package graph.
+/// A filterset that hasn't been compiled against a package graph.
 ///
 /// XXX: explain why `S` is required (for equality checking w/tests), or replace it with its own
 /// structure.
@@ -151,7 +155,7 @@ impl ParsedExpr {
         ParsedExpr::Set(SetDef::None)
     }
 
-    #[allow(unused)]
+    #[cfg(test)]
     fn drop_source_span(self) -> ParsedExpr<()> {
         match self {
             Self::Not(op, expr) => ParsedExpr::Not(op, Box::new(expr.drop_source_span())),
@@ -227,14 +231,14 @@ fn expect_inner<'a, F, T>(
     mut parser: F,
     make_err: fn(SourceSpan) -> ParseSingleError,
     limit: SpanLength,
-) -> impl Parser<Span<'a>, Option<T>, Error>
+) -> impl ModalParser<Span<'a>, Option<T>, Error>
 where
-    F: Parser<Span<'a>, T, Error>,
+    F: ModalParser<Span<'a>, T, Error>,
 {
     move |input: &mut _| match parser.parse_next(input) {
         Ok(out) => Ok(Some(out)),
         Err(winnow::error::ErrMode::Backtrack(_)) | Err(winnow::error::ErrMode::Cut(_)) => {
-            let fragment_start = input.location();
+            let fragment_start = input.current_token_start();
             let fragment_length = input.slice_len();
             let span = match limit {
                 SpanLength::Unknown => (fragment_start, fragment_length).into(),
@@ -261,9 +265,9 @@ where
 fn expect<'a, F, T>(
     parser: F,
     make_err: fn(SourceSpan) -> ParseSingleError,
-) -> impl Parser<Span<'a>, Option<T>, Error>
+) -> impl ModalParser<Span<'a>, Option<T>, Error>
 where
-    F: Parser<Span<'a>, T, Error>,
+    F: ModalParser<Span<'a>, T, Error>,
 {
     expect_inner(parser, make_err, SpanLength::Unknown)
 }
@@ -272,9 +276,9 @@ fn expect_n<'a, F, T>(
     parser: F,
     make_err: fn(SourceSpan) -> ParseSingleError,
     limit: SpanLength,
-) -> impl Parser<Span<'a>, Option<T>, Error>
+) -> impl ModalParser<Span<'a>, Option<T>, Error>
 where
-    F: Parser<Span<'a>, T, Error>,
+    F: ModalParser<Span<'a>, T, Error>,
 {
     expect_inner(parser, make_err, limit)
 }
@@ -282,13 +286,13 @@ where
 fn expect_char<'a>(
     c: char,
     make_err: fn(SourceSpan) -> ParseSingleError,
-) -> impl Parser<Span<'a>, Option<char>, Error> {
+) -> impl ModalParser<Span<'a>, Option<char>, Error> {
     expect_inner(ws(c), make_err, SpanLength::Exact(0))
 }
 
-fn silent_expect<'a, F, T>(mut parser: F) -> impl Parser<Span<'a>, Option<T>, Error>
+fn silent_expect<'a, F, T>(mut parser: F) -> impl ModalParser<Span<'a>, Option<T>, Error>
 where
-    F: Parser<Span<'a>, T, Error>,
+    F: ModalParser<Span<'a>, T, Error>,
 {
     move |input: &mut _| match parser.parse_next(input) {
         Ok(out) => Ok(Some(out)),
@@ -297,10 +301,12 @@ where
     }
 }
 
-fn ws<'a, T, P: Parser<Span<'a>, T, Error>>(mut inner: P) -> impl Parser<Span<'a>, T, Error> {
+fn ws<'a, T, P: ModalParser<Span<'a>, T, Error>>(
+    mut inner: P,
+) -> impl ModalParser<Span<'a>, T, Error> {
     move |input: &mut Span<'a>| {
         let start = input.checkpoint();
-        repeat(
+        () = repeat(
             0..,
             alt((
                 // Match individual space characters.
@@ -340,7 +346,7 @@ fn parse_matcher_text<'i>(input: &mut Span<'i>) -> PResult<Option<String>> {
         };
 
         if res.as_ref().map(|s| s.is_empty()).unwrap_or(false) {
-            let start = input.location();
+            let start = input.current_token_start();
             input
                 .state
                 .report_error(ParseSingleError::InvalidString((start..0).into()));
@@ -443,7 +449,7 @@ fn parse_regex<'i>(input: &mut Span<'i>) -> PResult<Option<NameMatcher>> {
                 input.reset(&start);
                 match take_till::<_, _, Error>(0.., ')').parse_next(input) {
                     Ok(_) => {
-                        let start = input.location();
+                        let start = input.current_token_start();
                         let err = ParseSingleError::ExpectedCloseRegex((start, 0).into());
                         input.state.report_error(err);
                         return Ok(None);
@@ -458,10 +464,10 @@ fn parse_regex<'i>(input: &mut Span<'i>) -> PResult<Option<NameMatcher>> {
                 let end = input.checkpoint();
 
                 input.reset(&start);
-                let start = input.location();
+                let start = input.current_token_start();
 
                 input.reset(&end);
-                let end = input.location();
+                let end = input.current_token_start();
 
                 let err = ParseSingleError::invalid_regex(&res, start, end);
                 input.state.report_error(err);
@@ -491,7 +497,7 @@ fn parse_glob_matcher(input: &mut Span<'_>) -> PResult<Option<NameMatcher>> {
 // This parse will never fail (because default_matcher won't)
 fn set_matcher<'a>(
     default_matcher: DefaultMatcher,
-) -> impl Parser<Span<'a>, Option<NameMatcher>, Error> {
+) -> impl ModalParser<Span<'a>, Option<NameMatcher>, Error> {
     ws(alt((
         parse_regex_matcher,
         parse_glob_matcher,
@@ -506,7 +512,7 @@ fn recover_unexpected_comma<'i>(input: &mut Span<'i>) -> PResult<()> {
         let start = input.checkpoint();
         match peek(ws(',')).parse_next(input) {
             Ok(_) => {
-                let pos = input.location();
+                let pos = input.current_token_start();
                 input
                     .state
                     .report_error(ParseSingleError::UnexpectedComma((pos..0).into()));
@@ -526,12 +532,13 @@ fn recover_unexpected_comma<'i>(input: &mut Span<'i>) -> PResult<()> {
 
 fn nullary_set_def<'a>(
     name: &'static str,
-    make_set: fn() -> SetDef,
-) -> impl Parser<Span<'a>, Option<SetDef>, Error> {
-    move |i: &mut _| {
+    make_set: fn(SourceSpan) -> SetDef,
+) -> impl ModalParser<Span<'a>, Option<SetDef>, Error> {
+    move |i: &mut Span<'_>| {
+        let start = i.current_token_start();
         let _ = literal(name).parse_next(i)?;
         let _ = expect_char('(', ParseSingleError::ExpectedOpenParenthesis).parse_next(i)?;
-        let err_loc = i.location();
+        let err_loc = i.current_token_start();
         match take_till::<_, _, Error>(0.., ')').parse_next(i) {
             Ok(res) => {
                 if !res.trim().is_empty() {
@@ -541,9 +548,10 @@ fn nullary_set_def<'a>(
                 }
             }
             Err(_) => unreachable!(),
-        }
+        };
         let _ = expect_char(')', ParseSingleError::ExpectedCloseParenthesis).parse_next(i)?;
-        Ok(Some(make_set()))
+        let end = i.current_token_start();
+        Ok(Some(make_set((start, end - start).into())))
     }
 }
 
@@ -556,7 +564,7 @@ enum DefaultMatcher {
 }
 
 impl DefaultMatcher {
-    fn into_parser<'a>(self) -> impl Parser<Span<'a>, Option<NameMatcher>, Error> {
+    fn into_parser<'a>(self) -> impl ModalParser<Span<'a>, Option<NameMatcher>, Error> {
         move |input: &mut _| match self {
             Self::Equal => parse_matcher_text
                 .map(|res: Option<String>| res.map(NameMatcher::implicit_equal))
@@ -573,13 +581,13 @@ fn unary_set_def<'a>(
     name: &'static str,
     default_matcher: DefaultMatcher,
     make_set: fn(NameMatcher, SourceSpan) -> SetDef,
-) -> impl Parser<Span<'a>, Option<SetDef>, Error> {
+) -> impl ModalParser<Span<'a>, Option<SetDef>, Error> {
     move |i: &mut _| {
         let _ = literal(name).parse_next(i)?;
         let _ = expect_char('(', ParseSingleError::ExpectedOpenParenthesis).parse_next(i)?;
-        let start = i.location();
+        let start = i.current_token_start();
         let res = set_matcher(default_matcher).parse_next(i)?;
-        let end = i.location();
+        let end = i.current_token_start();
         recover_unexpected_comma.parse_next(i)?;
         let _ = expect_char(')', ParseSingleError::ExpectedCloseParenthesis).parse_next(i)?;
         Ok(res.map(|matcher| make_set(matcher, (start, end - start).into())))
@@ -589,10 +597,10 @@ fn unary_set_def<'a>(
 fn platform_def(i: &mut Span<'_>) -> PResult<Option<SetDef>> {
     let _ = "platform".parse_next(i)?;
     let _ = expect_char('(', ParseSingleError::ExpectedOpenParenthesis).parse_next(i)?;
-    let start = i.location();
+    let start = i.current_token_start();
     // Try parsing the argument as a string for better error messages.
     let res = ws(parse_matcher_text).parse_next(i)?;
-    let end = i.location();
+    let end = i.current_token_start();
     recover_unexpected_comma.parse_next(i)?;
     let _ = expect_char(')', ParseSingleError::ExpectedCloseParenthesis).parse_next(i)?;
 
@@ -628,16 +636,17 @@ fn parse_set_def(input: &mut Span<'_>) -> PResult<Option<SetDef>> {
             unary_set_def("binary", DefaultMatcher::Glob, SetDef::Binary),
             unary_set_def("test", DefaultMatcher::Contains, SetDef::Test),
             platform_def,
-            nullary_set_def("all", || SetDef::All),
-            nullary_set_def("none", || SetDef::None),
+            nullary_set_def("default", SetDef::Default),
+            nullary_set_def("all", |_| SetDef::All),
+            nullary_set_def("none", |_| SetDef::None),
         ))),
     )
     .parse_next(input)
 }
 
-fn expect_expr<'a, P: Parser<Span<'a>, ExprResult, Error>>(
+fn expect_expr<'a, P: ModalParser<Span<'a>, ExprResult, Error>>(
     inner: P,
-) -> impl Parser<Span<'a>, ExprResult, Error> {
+) -> impl ModalParser<Span<'a>, ExprResult, Error> {
     expect(inner, ParseSingleError::ExpectedExpr).map(|res| res.unwrap_or(ExprResult::Error))
 }
 
@@ -762,11 +771,11 @@ fn parse_or_operator<'i>(input: &mut Span<'i>) -> PResult<Option<OrOperator>> {
         "parse_or_operator",
         ws(alt((
             |input: &mut Span<'i>| {
-                let start = input.location();
+                let start = input.current_token_start();
                 // This is not a valid OR operator in this position, but catch it to provide a better
                 // experience.
                 let op = alt(("||", "OR ")).parse_next(input)?;
-                // || is not supported in filter expressions: suggest using | instead.
+                // || is not supported in filtersets: suggest using | instead.
                 let length = op.len();
                 let err = ParseSingleError::InvalidOrOperator((start, length).into());
                 input.state.report_error(err);
@@ -865,9 +874,9 @@ fn parse_and_or_difference_operator<'i>(
         "parse_and_or_difference_operator",
         ws(alt((
             |input: &mut Span<'i>| {
-                let start = input.location();
+                let start = input.current_token_start();
                 let op = alt(("&&", "AND ")).parse_next(input)?;
-                // && is not supported in filter expressions: suggest using & instead.
+                // && is not supported in filtersets: suggest using & instead.
                 let length = op.len();
                 let err = ParseSingleError::InvalidAndOperator((start, length).into());
                 input.state.report_error(err);

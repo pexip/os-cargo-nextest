@@ -1,6 +1,6 @@
 [package]
 name = "nextest-filtering"
-version = "0.9.0"
+version = "0.15.0"
 description = "Filtering DSL for cargo-nextest"
 license = "MIT OR Apache-2.0"
 edition = "2021"
@@ -27,22 +27,23 @@ internal-testing = ["dep:proptest", "dep:test-strategy", "dep:xxhash-rust"]
 
 [dependencies]
 globset.workspace = true
-guppy = "0.17.5"
+guppy.workspace = true
 miette.workspace = true
-recursion = "0.5.2"
-regex = "1.10.4"
-regex-syntax = "0.8.3"
-thiserror = "1.0.61"
 nextest-metadata.workspace = true
-proptest = { version = "1.4.0", optional = true }
-test-strategy = { version = "0.3.1", optional = true }
-xxhash-rust = { version = "0.8.10", features = ["xxh3"], optional = true }
 nextest-workspace-hack.workspace = true
-winnow = "0.6.8"
+proptest = { workspace = true, optional = true }
+recursion.workspace = true
+regex-syntax.workspace = true
+regex.workspace = true
+smol_str.workspace = true
+test-strategy = { workspace = true, optional = true }
+thiserror.workspace = true
+winnow.workspace = true
+xxhash-rust = { workspace = true, features = ["xxh3"], optional = true }
 
 [dev-dependencies]
-clap = { version = "4.5.4", features = ["derive"] }
-camino = "1.1.7"
-test-case = "3.3.1"
-proptest = { version = "1.4.0" }
-test-strategy = { version = "0.3.1" }
+camino.workspace = true
+clap.workspace = true
+proptest.workspace = true
+test-case.workspace = true
+test-strategy.workspace = true

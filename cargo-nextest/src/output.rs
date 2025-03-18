@@ -3,20 +3,32 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use clap::{Args, ValueEnum};
-use env_logger::fmt::Formatter;
-use log::{Level, LevelFilter, Record};
 use miette::{GraphicalTheme, MietteHandlerOpts, ThemeStyles};
 use nextest_runner::{reporter::ReporterStderr, write_str::WriteStr};
-use owo_colors::{style, OwoColorize, Stream, Style};
+use owo_colors::{OwoColorize, Style, style};
 use std::{
+    fmt,
     io::{self, BufWriter, Stderr, Stdout, Write},
     marker::PhantomData,
+};
+use tracing::{
+    Event, Level, Subscriber,
+    field::{Field, Visit},
+    level_filters::LevelFilter,
+};
+use tracing_subscriber::{
+    Layer,
+    filter::Targets,
+    fmt::{FmtContext, FormatEvent, FormatFields, format},
+    layer::SubscriberExt,
+    registry::LookupSpan,
+    util::SubscriberInitExt,
 };
 
 pub(crate) mod clap_styles {
     use clap::builder::{
-        styling::{AnsiColor, Effects, Style},
         Styles,
+        styling::{AnsiColor, Effects, Style},
     };
 
     const HEADER: Style = AnsiColor::Green.on_default().effects(Effects::BOLD);
@@ -74,9 +86,32 @@ impl OutputOpts {
 
 #[derive(Copy, Clone, Debug)]
 #[must_use]
-pub(crate) struct OutputContext {
+pub struct OutputContext {
     pub(crate) verbose: bool,
     pub(crate) color: Color,
+}
+
+impl OutputContext {
+    // color_never_init is only used for double-spawning, which only exists on Unix platforms.
+    #[cfg(unix)]
+    pub(crate) fn color_never_init() -> Self {
+        Color::Never.init();
+        Self {
+            verbose: false,
+            color: Color::Never,
+        }
+    }
+
+    /// Returns general stderr styles for the current output context.
+    pub fn stderr_styles(&self) -> StderrStyles {
+        let mut styles = StderrStyles::default();
+
+        if self.color.should_colorize(supports_color::Stream::Stderr) {
+            styles.colorize();
+        }
+
+        styles
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -91,26 +126,121 @@ pub enum Color {
 
 static INIT_LOGGER: std::sync::Once = std::sync::Once::new();
 
-impl Color {
-    pub(crate) fn init(self) {
-        match self {
-            Color::Auto => {
-                owo_colors::unset_override();
-            }
-            Color::Always => {
-                owo_colors::set_override(true);
-            }
-            Color::Never => {
-                owo_colors::set_override(false);
+struct SimpleFormatter {
+    styles: LogStyles,
+}
+
+impl<S, N> FormatEvent<S, N> for SimpleFormatter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        _ctx: &FmtContext<'_, S, N>,
+        mut writer: format::Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let metadata = event.metadata();
+
+        if metadata.target() != "cargo_nextest::no_heading" {
+            match *metadata.level() {
+                Level::ERROR => {
+                    write!(writer, "{}: ", "error".style(self.styles.error))?;
+                }
+                Level::WARN => {
+                    write!(writer, "{}: ", "warning".style(self.styles.warning))?;
+                }
+                Level::INFO => {
+                    write!(writer, "{}: ", "info".style(self.styles.info))?;
+                }
+                Level::DEBUG => {
+                    write!(writer, "{}: ", "debug".style(self.styles.debug))?;
+                }
+                Level::TRACE => {
+                    write!(writer, "{}: ", "trace".style(self.styles.trace))?;
+                }
             }
         }
 
+        let mut visitor = MessageVisitor {
+            writer: &mut writer,
+            // Show other fields for debug or trace output.
+            show_other: *metadata.level() >= Level::DEBUG,
+            error: None,
+        };
+
+        event.record(&mut visitor);
+
+        if let Some(error) = visitor.error {
+            return Err(error);
+        }
+
+        writeln!(writer)
+    }
+}
+
+static MESSAGE_FIELD: &str = "message";
+
+struct MessageVisitor<'writer, 'a> {
+    writer: &'a mut format::Writer<'writer>,
+    show_other: bool,
+    error: Option<fmt::Error>,
+}
+
+impl Visit for MessageVisitor<'_, '_> {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name() == MESSAGE_FIELD {
+            if let Err(error) = write!(self.writer, "{:?}", value) {
+                self.error = Some(error);
+            }
+        } else if self.show_other {
+            if let Err(error) = write!(self.writer, "; {} = {:?}", field.name(), value) {
+                self.error = Some(error);
+            }
+        }
+    }
+}
+
+impl Color {
+    pub(crate) fn init(self) {
+        // Pass the styles in as a stylesheet to ensure we use the latest supports-color here.
+        let mut log_styles = LogStyles::default();
+        if self.should_colorize(supports_color::Stream::Stderr) {
+            log_styles.colorize();
+        }
+
         INIT_LOGGER.call_once(|| {
-            env_logger::Builder::new()
-                .filter_level(LevelFilter::Info)
-                .parse_env("NEXTEST_LOG")
-                .format(format_fn)
-                .init();
+            let level_str = std::env::var_os("NEXTEST_LOG").unwrap_or_default();
+            let level_str = level_str
+                .into_string()
+                .unwrap_or_else(|_| panic!("NEXTEST_LOG is not UTF-8"));
+
+            // If the level string is empty, use the standard level filter instead.
+            let targets = if level_str.is_empty() {
+                Targets::new().with_default(LevelFilter::INFO)
+            } else {
+                level_str.parse().expect("unable to parse NEXTEST_LOG")
+            };
+
+            let layer = tracing_subscriber::fmt::layer()
+                .event_format(SimpleFormatter { styles: log_styles })
+                .with_writer(std::io::stderr)
+                .with_filter(targets);
+
+            cfg_if::cfg_if! {
+                if #[cfg(feature = "experimental-tokio-console")] {
+                    let console_layer = nextest_runner::console::spawn();
+                    tracing_subscriber::registry()
+                        .with(layer)
+                        .with(console_layer)
+                        .init();
+                } else {
+                    tracing_subscriber::registry()
+                        .with(layer)
+                        .init();
+                }
+            }
 
             miette::set_hook(Box::new(move |_| {
                 let theme_styles = if self.should_colorize(supports_color::Stream::Stderr) {
@@ -159,38 +289,35 @@ impl Color {
     }
 }
 
-fn format_fn(f: &mut Formatter, record: &Record<'_>) -> std::io::Result<()> {
-    if record.target() == "cargo_nextest::no_heading" {
-        writeln!(f, "{}", record.args())?;
-        return Ok(());
-    }
+#[derive(Debug, Default)]
+struct LogStyles {
+    error: Style,
+    warning: Style,
+    info: Style,
+    debug: Style,
+    trace: Style,
+}
 
-    match record.level() {
-        Level::Error => writeln!(
-            f,
-            "{}: {}",
-            "error".if_supports_color(Stream::Stderr, |s| s.style(Style::new().red().bold())),
-            record.args()
-        ),
-        Level::Warn => writeln!(
-            f,
-            "{}: {}",
-            "warning".if_supports_color(Stream::Stderr, |s| s.style(Style::new().yellow().bold())),
-            record.args()
-        ),
-        Level::Info => writeln!(
-            f,
-            "{}: {}",
-            "info".if_supports_color(Stream::Stderr, |s| s.bold()),
-            record.args()
-        ),
-        Level::Debug => writeln!(
-            f,
-            "{}: {}",
-            "debug".if_supports_color(Stream::Stderr, |s| s.bold()),
-            record.args()
-        ),
-        _other => Ok(()),
+impl LogStyles {
+    fn colorize(&mut self) {
+        self.error = style().red().bold();
+        self.warning = style().yellow().bold();
+        self.info = style().bold();
+        self.debug = style().bold();
+        self.trace = style().dimmed();
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct StderrStyles {
+    pub(crate) bold: Style,
+    pub(crate) warning_text: Style,
+}
+
+impl StderrStyles {
+    fn colorize(&mut self) {
+        self.bold = style().bold();
+        self.warning_text = style().yellow();
     }
 }
 
@@ -258,7 +385,7 @@ pub(crate) enum StdoutWriter<'a> {
     Test { buf: &'a mut Vec<u8> },
 }
 
-impl<'a> Write for StdoutWriter<'a> {
+impl Write for StdoutWriter<'_> {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         match self {
             Self::Normal { buf, .. } => buf.write(data),
@@ -276,7 +403,7 @@ impl<'a> Write for StdoutWriter<'a> {
     }
 }
 
-impl<'a> WriteStr for StdoutWriter<'a> {
+impl WriteStr for StdoutWriter<'_> {
     fn write_str(&mut self, s: &str) -> io::Result<()> {
         match self {
             Self::Normal { buf, .. } => buf.write_all(s.as_bytes()),
@@ -303,7 +430,7 @@ pub(crate) enum StderrWriter<'a> {
     Test { buf: &'a mut Vec<u8> },
 }
 
-impl<'a> Write for StderrWriter<'a> {
+impl Write for StderrWriter<'_> {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         match self {
             Self::Normal { buf, .. } => buf.write(data),

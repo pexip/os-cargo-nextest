@@ -5,12 +5,22 @@
 //!
 //! This module is adapted from [indenter](https://github.com/eyre-rs/indenter) and is used under the
 //! terms of the MIT or Apache-2.0 licenses.
+//!
+//! # Notes
+//!
+//! We previously used to use `indenter` to indent multi-line `fmt::Display`
+//! instances. However, at some point we needed to also indent
+//! `std::io::Write`s, not just `fmt::Write`. `indenter` 0.3.3 doesn't support
+//! `std::io::Write`, so we switched to `indent_write`.
+//!
+//! This file still has the `indenter` API. So we have both APIs floating around
+//! for a bit... oh well. Still in two minds about which one's better here.
 
 use crate::write_str::WriteStr;
 use std::io;
 
 /// The set of supported formats for indentation
-#[allow(missing_debug_implementations)]
+#[expect(missing_debug_implementations)]
 pub enum Format<'a> {
     /// Insert uniform indentation before every line
     ///
@@ -45,7 +55,7 @@ pub enum Format<'a> {
 /// lets it intercept each piece of output as its being written to the output buffer. It then
 /// splits on newlines giving slices into the original string. Finally we alternate writing these
 /// lines and the specified indentation to the output buffer.
-#[allow(missing_debug_implementations)]
+#[expect(missing_debug_implementations)]
 pub struct Indented<'a, D: ?Sized> {
     inner: &'a mut D,
     needs_indent: bool,
@@ -60,10 +70,10 @@ pub type Inserter = dyn FnMut(usize, &mut dyn WriteStr) -> io::Result<()>;
 impl Format<'_> {
     fn insert_indentation(&mut self, line: usize, f: &mut dyn WriteStr) -> io::Result<()> {
         match self {
-            Format::Uniform { indentation } => write!(f, "{}", indentation),
+            Format::Uniform { indentation } => write!(f, "{indentation}"),
             Format::Numbered { ind } => {
                 if line == 0 {
-                    write!(f, "{: >4}: ", ind)
+                    write!(f, "{ind: >4}: ")
                 } else {
                     write!(f, "      ")
                 }
@@ -117,7 +127,7 @@ where
                 self.needs_indent = false;
             }
 
-            self.inner.write_fmt(format_args!("{}", line))?;
+            self.inner.write_fmt(format_args!("{line}"))?;
         }
 
         Ok(())

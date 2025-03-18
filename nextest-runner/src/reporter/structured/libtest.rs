@@ -22,13 +22,11 @@
 //! users to move to the new format or stick to the format version(s) they were
 //! using before
 
-use super::{
-    FormatVersionError, FormatVersionErrorInner, TestEvent, TestEventKind, WriteEventError,
-};
 use crate::{
+    errors::{DisplayErrorChain, FormatVersionError, FormatVersionErrorInner, WriteEventError},
     list::RustTestSuite,
-    runner::ExecutionResult,
-    test_output::{TestOutput, TestSingleOutput},
+    reporter::events::{ExecutionResult, TestEvent, TestEventKind},
+    test_output::{ChildExecutionOutput, ChildOutput, ChildSingleOutput},
 };
 use bstr::ByteSlice;
 use nextest_metadata::MismatchReason;
@@ -160,7 +158,7 @@ impl<'cfg> LibtestReporter<'cfg> {
         let Some((major, minor)) = version.split_once('.') else {
             return Err(FormatVersionError {
                 input: version.into(),
-                err: FormatVersionErrorInner::InvalidFormat {
+                error: FormatVersionErrorInner::InvalidFormat {
                     expected: "<major>.<minor>",
                 },
             });
@@ -168,7 +166,7 @@ impl<'cfg> LibtestReporter<'cfg> {
 
         let major: u8 = major.parse().map_err(|err| FormatVersionError {
             input: version.into(),
-            err: FormatVersionErrorInner::InvalidInteger {
+            error: FormatVersionErrorInner::InvalidInteger {
                 which: "major",
                 err,
             },
@@ -176,7 +174,7 @@ impl<'cfg> LibtestReporter<'cfg> {
 
         let minor: u8 = minor.parse().map_err(|err| FormatVersionError {
             input: version.into(),
-            err: FormatVersionErrorInner::InvalidInteger {
+            error: FormatVersionErrorInner::InvalidInteger {
                 which: "minor",
                 err,
             },
@@ -187,7 +185,7 @@ impl<'cfg> LibtestReporter<'cfg> {
             o => {
                 return Err(FormatVersionError {
                     input: version.into(),
-                    err: FormatVersionErrorInner::InvalidValue {
+                    error: FormatVersionErrorInner::InvalidValue {
                         which: "major",
                         value: o,
                         range: (FormatMajorVersion::Unstable as u8)
@@ -202,7 +200,7 @@ impl<'cfg> LibtestReporter<'cfg> {
             o => {
                 return Err(FormatVersionError {
                     input: version.into(),
-                    err: FormatVersionErrorInner::InvalidValue {
+                    error: FormatVersionErrorInner::InvalidValue {
                         which: "minor",
                         value: o,
                         range: (FormatMinorVersion::First as u8)..(FormatMinorVersion::_Max as u8),
@@ -378,7 +376,7 @@ impl<'cfg> LibtestReporter<'cfg> {
                         write!(out, r#","stdout":""#).map_err(fmt_err)?;
 
                         strip_human_output_from_failed_test(
-                            last_status.output.as_ref(),
+                            &last_status.output,
                             out,
                             test_instance.name,
                         )?;
@@ -491,41 +489,74 @@ impl<'cfg> LibtestReporter<'cfg> {
 /// This function relies on the fact that nextest runs every individual test in
 /// isolation.
 fn strip_human_output_from_failed_test(
-    output: Option<&TestOutput>,
+    output: &ChildExecutionOutput,
     out: &mut bytes::BytesMut,
     test_name: &str,
 ) -> Result<(), WriteEventError> {
     match output {
-        Some(TestOutput::Combined { output }) => {
-            strip_human_stdout_or_combined(output, out, test_name)?;
-        }
-        Some(TestOutput::Split { stdout, stderr }) => {
-            // This is not a case that we hit because we always set CaptureStrategy to Combined. But
-            // handle it in a reasonable fashion.
-            debug_assert!(false, "libtest output requires CaptureStrategy::Combined");
-            if !stdout.is_empty() {
-                write!(out, "--- STDOUT ---\\n").map_err(fmt_err)?;
-                strip_human_stdout_or_combined(stdout, out, test_name)?;
+        ChildExecutionOutput::Output {
+            result: _,
+            output,
+            errors,
+        } => {
+            match output {
+                ChildOutput::Combined { output } => {
+                    strip_human_stdout_or_combined(output, out, test_name)?;
+                }
+                ChildOutput::Split(split) => {
+                    // This is not a case that we hit because we always set CaptureStrategy to Combined. But
+                    // handle it in a reasonable fashion. (We do have a unit test for this case, so gate the
+                    // assertion with cfg(not(test)).)
+                    #[cfg(not(test))]
+                    {
+                        debug_assert!(false, "libtest output requires CaptureStrategy::Combined");
+                    }
+                    if let Some(stdout) = &split.stdout {
+                        if !stdout.is_empty() {
+                            write!(out, "--- STDOUT ---\\n").map_err(fmt_err)?;
+                            strip_human_stdout_or_combined(stdout, out, test_name)?;
+                        }
+                    } else {
+                        write!(out, "(stdout not captured)").map_err(fmt_err)?;
+                    }
+                    // If stderr is not empty, just write all of it in.
+                    if let Some(stderr) = &split.stderr {
+                        if !stderr.is_empty() {
+                            write!(out, "\\n--- STDERR ---\\n").map_err(fmt_err)?;
+                            write!(out, "{}", EscapedString(stderr.as_str_lossy()))
+                                .map_err(fmt_err)?;
+                        }
+                    } else {
+                        writeln!(out, "\\n(stderr not captured)").map_err(fmt_err)?;
+                    }
+                }
             }
-            // If stderr is not empty, just write all of it in.
-            if !stderr.is_empty() {
-                write!(out, "\\n--- STDERR ---\\n").map_err(fmt_err)?;
-                write!(out, "{}", EscapedString(&stderr.to_str_lossy())).map_err(fmt_err)?;
+
+            if let Some(errors) = errors {
+                write!(out, "\\n--- EXECUTION ERRORS ---\\n").map_err(fmt_err)?;
+                write!(
+                    out,
+                    "{}",
+                    EscapedString(&DisplayErrorChain::new(errors).to_string())
+                )
+                .map_err(fmt_err)?;
             }
         }
-        Some(TestOutput::ExecFail { description, .. }) => {
-            write!(out, "--- EXEC FAIL ---\\n").map_err(fmt_err)?;
-            write!(out, "{}", EscapedString(description)).map_err(fmt_err)?;
-        }
-        None => {
-            write!(out, "(output not captured)").map_err(fmt_err)?;
+        ChildExecutionOutput::StartError(error) => {
+            write!(out, "--- EXECUTION ERROR ---\\n").map_err(fmt_err)?;
+            write!(
+                out,
+                "{}",
+                EscapedString(&DisplayErrorChain::new(error).to_string())
+            )
+            .map_err(fmt_err)?;
         }
     }
     Ok(())
 }
 
 fn strip_human_stdout_or_combined(
-    output: &TestSingleOutput,
+    output: &ChildSingleOutput,
     out: &mut bytes::BytesMut,
     test_name: &str,
 ) -> Result<(), WriteEventError> {
@@ -556,7 +587,7 @@ fn strip_human_stdout_or_combined(
     } else {
         // This is most likely a custom test harness. Just write out the entire
         // output.
-        write!(out, "{}", EscapedString(&output.to_str_lossy())).map_err(fmt_err)?;
+        write!(out, "{}", EscapedString(output.as_str_lossy())).map_err(fmt_err)?;
     }
 
     Ok(())
@@ -567,7 +598,7 @@ fn strip_human_stdout_or_combined(
 /// <https://github.com/rust-lang/rust/blob/f440b5f0ea042cb2087a36631b20878f9847ee28/library/test/src/formatters/json.rs#L222-L285>
 struct EscapedString<'s>(&'s str);
 
-impl<'s> std::fmt::Display for EscapedString<'s> {
+impl std::fmt::Display for EscapedString<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> ::std::fmt::Result {
         let mut start = 0;
         let s = self.0;
@@ -634,9 +665,13 @@ impl<'s> std::fmt::Display for EscapedString<'s> {
 #[cfg(test)]
 mod test {
     use crate::{
-        reporter::structured::libtest::strip_human_output_from_failed_test, test_output::TestOutput,
+        errors::ChildStartError,
+        reporter::structured::libtest::strip_human_output_from_failed_test,
+        test_output::{ChildExecutionOutput, ChildOutput, ChildSplitOutput},
     };
     use bytes::BytesMut;
+    use color_eyre::eyre::eyre;
+    use std::{io, sync::Arc};
 
     /// Validates that the human output portion from a failed test is stripped
     /// out when writing a JSON string, as it is not part of the output when
@@ -650,7 +685,7 @@ mod test {
             "this is stdout\n",
             "this i stderr\nok?\n",
             "thread 'index::test::download_url_crates_io'",
-            r#" panicked at src/index.rs:206:9:
+            r" panicked at src/index.rs:206:9:
 oh no
 stack backtrace:
     0: rust_begin_unwind
@@ -666,7 +701,7 @@ stack backtrace:
     5: core::ops::function::FnOnce::call_once
                 at /rustc/a28077b28a02b92985b3a3faecf92813155f1ea1/library/core/src/ops/function.rs:250:5
 note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-"#,
+",
             "test index::test::download_url_crates_io ... FAILED\n",
             "\n\nfailures:\n\nfailures:\n    index::test::download_url_crates_io\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.01s\n",
         ];
@@ -677,14 +712,18 @@ note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose bac
                 acc.extend_from_slice(line.as_bytes());
             }
 
-            TestOutput::Combined {
+            ChildOutput::Combined {
                 output: acc.freeze().into(),
             }
         };
 
         let mut actual = bytes::BytesMut::new();
         strip_human_output_from_failed_test(
-            Some(&output),
+            &ChildExecutionOutput::Output {
+                result: None,
+                output,
+                errors: None,
+            },
             &mut actual,
             "index::test::download_url_crates_io",
         )
@@ -704,28 +743,35 @@ note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose bac
                 acc.extend_from_slice(line.as_bytes());
             }
 
-            TestOutput::Combined {
+            ChildOutput::Combined {
                 output: acc.freeze().into(),
             }
         };
 
         let mut actual = bytes::BytesMut::new();
-        strip_human_output_from_failed_test(Some(&output), &mut actual, "non-existent").unwrap();
+        strip_human_output_from_failed_test(
+            &ChildExecutionOutput::Output {
+                result: None,
+                output,
+                errors: None,
+            },
+            &mut actual,
+            "non-existent",
+        )
+        .unwrap();
 
         insta::assert_snapshot!(std::str::from_utf8(&actual).unwrap());
     }
 
     #[test]
-    fn strips_human_output_exec_fail() {
-        let output = {
-            TestOutput::ExecFail {
-                message: "this is a message".to_owned(),
-                description: "this is a message\nthis is a description\n".to_owned(),
-            }
-        };
+    fn strips_human_output_start_error() {
+        let inner_error = eyre!("inner error");
+        let error = io::Error::new(io::ErrorKind::Other, inner_error);
+
+        let output = ChildExecutionOutput::StartError(ChildStartError::Spawn(Arc::new(error)));
 
         let mut actual = bytes::BytesMut::new();
-        strip_human_output_from_failed_test(Some(&output), &mut actual, "non-existent").unwrap();
+        strip_human_output_from_failed_test(&output, &mut actual, "non-existent").unwrap();
 
         insta::assert_snapshot!(std::str::from_utf8(&actual).unwrap());
     }
@@ -733,7 +779,19 @@ note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose bac
     #[test]
     fn strips_human_output_none() {
         let mut actual = bytes::BytesMut::new();
-        strip_human_output_from_failed_test(None, &mut actual, "non-existent").unwrap();
+        strip_human_output_from_failed_test(
+            &ChildExecutionOutput::Output {
+                result: None,
+                output: ChildOutput::Split(ChildSplitOutput {
+                    stdout: None,
+                    stderr: None,
+                }),
+                errors: None,
+            },
+            &mut actual,
+            "non-existent",
+        )
+        .unwrap();
 
         insta::assert_snapshot!(std::str::from_utf8(&actual).unwrap());
     }

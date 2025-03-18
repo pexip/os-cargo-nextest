@@ -19,6 +19,14 @@ impl NextestExitCode {
     /// An error was encountered while attempting to double-spawn a nextest process.
     pub const DOUBLE_SPAWN_ERROR: i32 = 70;
 
+    /// No tests were selected to run, but no other errors occurred.
+    ///
+    /// This is an advisory exit code generated if nextest is run with `--no-tests=fail` (soon to
+    /// become the default). See [discussion #1646] for more.
+    ///
+    /// [discussion #1646]: https://github.com/nextest-rs/nextest/discussions/1646
+    pub const NO_TESTS_RUN: i32 = 4;
+
     /// One or more tests failed.
     pub const TEST_RUN_FAILED: i32 = 100;
 
@@ -43,7 +51,8 @@ impl NextestExitCode {
     /// A downgrade was requested but not performed.
     pub const UPDATE_DOWNGRADE_NOT_PERFORMED: i32 = 81;
 
-    /// An update was available but the user canceled it.
+    // TODO: change this to UPDATE_CANCELLED
+    /// An update was available but the user cancelled it.
     pub const UPDATE_CANCELED: i32 = 82;
 
     /// A user issue happened while setting up a nextest invocation.
@@ -52,8 +61,8 @@ impl NextestExitCode {
     /// An experimental feature was used without the environment variable to enable it.
     pub const EXPERIMENTAL_FEATURE_NOT_ENABLED: i32 = 95;
 
-    /// A filtering expression failed to parse.
-    pub const INVALID_FILTER_EXPRESSION: i32 = 94;
+    /// A filterset failed to parse.
+    pub const INVALID_FILTERSET: i32 = 94;
 
     /// A self-update was requested but this version of cargo-nextest cannot perform self-updates.
     pub const SELF_UPDATE_UNAVAILABLE: i32 = 93;

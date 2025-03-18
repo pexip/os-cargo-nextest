@@ -1,13 +1,14 @@
 // Copyright (c) The nextest Contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use crate::{output::OutputContext, ExpectedError, Result};
+use crate::{ExpectedError, Result, output::OutputContext};
 use camino::Utf8PathBuf;
 use nextest_metadata::NextestExitCode;
 use nextest_runner::update::{CheckStatus, MuktiBackend, UpdateVersion};
-use owo_colors::{OwoColorize, Stream};
+use owo_colors::OwoColorize;
 use semver::Version;
 use std::cmp::Ordering;
+use tracing::info;
 
 // Returns the smallest version with a `self setup` command.
 fn min_version_with_setup() -> Version {
@@ -57,11 +58,13 @@ pub(crate) fn perform_update(
         v.cmp_precedence(&min_version_with_setup()).is_ge()
     })?;
 
+    let styles = output.stderr_styles();
+
     match status {
         CheckStatus::AlreadyOnRequested(version) => {
-            log::info!(
+            info!(
                 "cargo-nextest is already at the latest version: {}",
-                version.if_supports_color(Stream::Stderr, |s| s.bold())
+                version.style(styles.bold),
             );
             Ok(0)
         }
@@ -69,24 +72,24 @@ pub(crate) fn perform_update(
             current_version,
             requested,
         } => {
-            log::info!(
+            info!(
                 "not performing downgrade from {} to {}\n\
             (pass in --force to force downgrade)",
-                current_version.if_supports_color(Stream::Stderr, |s| s.bold()),
-                requested.if_supports_color(Stream::Stderr, |s| s.bold()),
+                current_version.style(styles.bold),
+                requested.style(styles.bold),
             );
             Ok(NextestExitCode::UPDATE_DOWNGRADE_NOT_PERFORMED)
         }
         CheckStatus::Success(ctx) => {
-            log::info!(
+            info!(
                 "{} available: {} -> {}",
                 match ctx.version.cmp(&current_version) {
                     Ordering::Greater => "update",
                     Ordering::Equal => "reinstall",
                     Ordering::Less => "downgrade",
                 },
-                current_version.if_supports_color(Stream::Stderr, |s| s.bold()),
-                ctx.version.if_supports_color(Stream::Stderr, |s| s.bold())
+                current_version.style(styles.bold),
+                ctx.version.style(styles.bold)
             );
             if check {
                 // check + non-empty ops implies a non-zero exit status.
@@ -113,13 +116,13 @@ pub(crate) fn perform_update(
             if should_apply {
                 ctx.do_update()
                     .map_err(|err| ExpectedError::UpdateError { err })?;
-                log::info!(
+                info!(
                     "cargo-nextest updated to {}",
-                    ctx.version.if_supports_color(Stream::Stderr, |s| s.bold())
+                    ctx.version.style(styles.bold)
                 );
                 Ok(0)
             } else {
-                log::info!("update canceled");
+                info!("update cancelled");
                 Ok(NextestExitCode::UPDATE_CANCELED)
             }
         }

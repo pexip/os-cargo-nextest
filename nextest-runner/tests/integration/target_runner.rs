@@ -3,17 +3,20 @@
 
 use crate::fixtures::*;
 use camino::Utf8Path;
-use color_eyre::Result;
+use color_eyre::{Result, eyre::ensure};
+use fixture_data::nextest_tests::EXPECTED_TEST_SUITES;
 use nextest_runner::{
+    RustcCli,
     cargo_config::{CargoConfigs, TargetTriple},
     config::NextestConfig,
     double_spawn::DoubleSpawnInfo,
+    input::InputHandlerKind,
     platform::{BuildPlatforms, HostPlatform, PlatformLibdir, TargetPlatform},
+    reporter::events::{FinalRunStats, RunStatsFailureKind},
     runner::TestRunnerBuilder,
     signal::SignalHandlerKind,
     target_runner::{PlatformRunner, TargetRunner},
     test_filter::{RunIgnored, TestFilterBuilder},
-    RustcCli,
 };
 use std::env;
 use target_spec::Platform;
@@ -28,7 +31,7 @@ fn runner_for_target(triple: Option<&str>) -> Result<(BuildPlatforms, TargetRunn
     .unwrap();
 
     let build_platforms = {
-        let host = HostPlatform::current(PlatformLibdir::from_rustc_stdout(
+        let host = HostPlatform::detect(PlatformLibdir::from_rustc_stdout(
             RustcCli::print_host_libdir().read(),
         ))?;
         let target = if let Some(triple) = TargetTriple::find(&configs, triple)? {
@@ -107,9 +110,11 @@ fn disregards_non_matching() {
         Vec::new(),
     )
     .unwrap();
-    assert!(PlatformRunner::find_config(&configs, &windows)
-        .unwrap()
-        .is_none());
+    assert!(
+        PlatformRunner::find_config(&configs, &windows)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -167,7 +172,7 @@ fn passthrough_path() -> &'static Utf8Path {
 
 fn current_runner_env_var() -> String {
     PlatformRunner::runner_env_var(
-        &Platform::current().expect("current platform is known to target-spec"),
+        &Platform::build_target().expect("current platform is known to target-spec"),
     )
 }
 
@@ -175,8 +180,12 @@ fn current_runner_env_var() -> String {
 fn test_listing_with_target_runner() -> Result<()> {
     set_env_vars();
 
-    let test_filter = TestFilterBuilder::any(RunIgnored::Default);
-    let test_list = FIXTURE_TARGETS.make_test_list(&test_filter, &TargetRunner::empty())?;
+    let test_filter = TestFilterBuilder::default_set(RunIgnored::Default);
+    let test_list = FIXTURE_TARGETS.make_test_list(
+        NextestConfig::DEFAULT_PROFILE,
+        &test_filter,
+        &TargetRunner::empty(),
+    )?;
 
     let bin_count = test_list.binary_count();
     let test_count = test_list.test_count();
@@ -188,7 +197,11 @@ fn test_listing_with_target_runner() -> Result<()> {
         );
         let (_, target_runner) = runner_for_target(None).unwrap();
 
-        let test_list = FIXTURE_TARGETS.make_test_list(&test_filter, &target_runner)?;
+        let test_list = FIXTURE_TARGETS.make_test_list(
+            NextestConfig::DEFAULT_PROFILE,
+            &test_filter,
+            &target_runner,
+        )?;
 
         assert_eq!(bin_count, test_list.binary_count());
         assert_eq!(test_count, test_list.test_count());
@@ -208,7 +221,7 @@ fn test_listing_with_target_runner() -> Result<()> {
 fn test_run_with_target_runner() -> Result<()> {
     set_env_vars();
 
-    let test_filter = TestFilterBuilder::any(RunIgnored::Default);
+    let test_filter = TestFilterBuilder::default_set(RunIgnored::Default);
 
     std::env::set_var(
         current_runner_env_var(),
@@ -221,7 +234,11 @@ fn test_run_with_target_runner() -> Result<()> {
         assert_eq!(passthrough_path(), runner.binary());
     }
 
-    let test_list = FIXTURE_TARGETS.make_test_list(&test_filter, &target_runner)?;
+    let test_list = FIXTURE_TARGETS.make_test_list(
+        NextestConfig::DEFAULT_PROFILE,
+        &test_filter,
+        &target_runner,
+    )?;
 
     let config = load_config();
     let profile = config
@@ -236,6 +253,7 @@ fn test_run_with_target_runner() -> Result<()> {
             &profile,
             vec![],
             SignalHandlerKind::Noop,
+            InputHandlerKind::Noop,
             DoubleSpawnInfo::disabled(),
             target_runner,
         )
@@ -243,12 +261,12 @@ fn test_run_with_target_runner() -> Result<()> {
 
     let (instance_statuses, run_stats) = execute_collect(runner);
 
-    for (name, expected) in &*EXPECTED_TESTS {
+    for (name, expected) in &*EXPECTED_TEST_SUITES {
         let test_binary = FIXTURE_TARGETS
             .test_artifacts
             .get(name)
             .unwrap_or_else(|| panic!("unexpected test name {name}"));
-        for fixture in expected {
+        for fixture in &expected.test_cases {
             let instance_value = instance_statuses
                 .get(&(test_binary.binary_path.as_path(), fixture.name))
                 .unwrap_or_else(|| {
@@ -259,7 +277,10 @@ fn test_run_with_target_runner() -> Result<()> {
                     )
                 });
             let valid = match &instance_value.status {
-                InstanceStatus::Skipped(_) => fixture.status.is_ignored(),
+                InstanceStatus::Skipped(_) => {
+                    ensure!(fixture.status.is_ignored(), "test should be skipped");
+                    Ok(())
+                }
                 InstanceStatus::Finished(run_statuses) => {
                     // This test should not have been retried since retries aren't configured.
                     assert_eq!(
@@ -270,32 +291,46 @@ fn test_run_with_target_runner() -> Result<()> {
                     );
                     let run_status = run_statuses.last_status();
 
-                    #[allow(unused_mut)]
-                    let mut expected_status = fixture.status.to_test_status(1);
-                    // On Unix, segfaults aren't passed through by the passthrough runner.
                     cfg_if::cfg_if! {
                         if #[cfg(unix)] {
-                            if fixture.status == FixtureStatus::Segfault {
-                                expected_status = nextest_runner::runner::ExecutionResult::Fail {
-                                    abort_status: None,
-                                    leaked: false,
-                                };
+                            // On Unix, segfaults aren't passed through by the
+                            // passthrough runner.
+                            if fixture.status == fixture_data::models::TestCaseFixtureStatus::Segfault {
+                                ensure_execution_result(
+                                    &run_status.result,
+                                    fixture_data::models::TestCaseFixtureStatus::Fail,
+                                    1,
+                                )
+                            } else {
+                                ensure_execution_result(&run_status.result, fixture.status, 1)
                             }
+                        } else if #[cfg(windows)] {
+                            ensure_execution_result(&run_status.result, fixture.status, 1)
+                        } else {
+                            compile_error!("unsupported platform")
                         }
                     }
-                    run_status.result == expected_status
                 }
             };
-            if !valid {
+            if let Err(error) = valid {
                 panic!(
-                    "for test {}, mismatch in status: expected {:?}, actual {:?}",
-                    fixture.name, fixture.status, instance_value.status
+                    "for test {}, mismatch in status: expected {:?}, actual {:?}, error: {}",
+                    fixture.name, fixture.status, instance_value.status, error
                 );
             }
         }
     }
 
-    assert!(!run_stats.is_success(), "run should be marked failed");
+    // Note: can't compare not_run because its exact value would depend on the number of threads on
+    // the machine.
+    assert!(
+        matches!(
+            run_stats.summarize_final(),
+            FinalRunStats::Failed(RunStatsFailureKind::Test { .. })
+        ),
+        "run should be marked failed, but got {:?}",
+        run_stats.summarize_final(),
+    );
 
     Ok(())
 }

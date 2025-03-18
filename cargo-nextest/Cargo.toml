@@ -1,7 +1,7 @@
 [package]
 name = "cargo-nextest"
 description = "A next-generation test runner for Rust."
-version = "0.9.72"
+version = "0.9.92"
 readme = "README.md"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/nextest-rs/nextest"
@@ -12,37 +12,42 @@ edition = "2021"
 rust-version.workspace = true
 
 [dependencies]
-camino = "1.1.7"
-cfg-if = "1.0.0"
-clap = { version = "4.5.4", features = ["derive", "env"] }
-# we don't use the tracing support
-color-eyre = { version = "0.6.3", default-features = false }
-dialoguer = "0.11.0"
-duct = "0.13.7"
-enable-ansi-support = "0.2.1"
-# we don't use the default formatter so we don't need default features
-env_logger = { version = "0.11.3", default-features = false }
-guppy = "0.17.5"
-log = "0.4.21"
-itertools = "0.12.1"
+camino.workspace = true
+cfg-if.workspace = true
+clap = { workspace = true, features = ["derive", "env", "unicode", "wrap_help"] }
+color-eyre.workspace = true
+dialoguer.workspace = true
+duct.workspace = true
+enable-ansi-support.workspace = true
+guppy.workspace = true
+idna_adapter.workspace = true
+indent_write.workspace = true
+itertools.workspace = true
 miette = { workspace = true, features = ["fancy"] }
-nextest-filtering = { version = "=0.9.0", path = "../nextest-filtering" }
-nextest-runner = { version = "=0.56.1", path = "../nextest-runner" }
-nextest-metadata = { version = "=0.11.0", path = "../nextest-metadata" }
-once_cell = "1.19.0"
-owo-colors.workspace = true
-pathdiff = { version = "0.2.1", features = ["camino"] }
-semver = "1.0.23"
-shell-words = "1.1.0"
-supports-color = "2.1.0"
-supports-unicode = "3.0.0"
-serde_json = "1.0.117"
-swrite.workspace = true
-thiserror = "1.0.61"
+# Instead of using workspace dependencies which have floating versions, we pin exact versions here
+# to avoid compatibility issues.
+nextest-filtering = { version = "=0.15.0", path = "../nextest-filtering" }
+nextest-metadata = { version = "=0.12.2", path = "../nextest-metadata" }
+nextest-runner = { version = "=0.75.0", path = "../nextest-runner" }
 nextest-workspace-hack.workspace = true
+owo-colors.workspace = true
+pathdiff.workspace = true
+quick-junit.workspace = true
+semver.workspace = true
+serde_json.workspace = true
+shell-words.workspace = true
+supports-color.workspace = true
+supports-unicode.workspace = true
+swrite.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, default-features = false }
+
+[build-dependencies]
+camino.workspace = true
 
 [dev-dependencies]
-camino-tempfile = "1.1.1"
+camino-tempfile.workspace = true
 
 [features]
 default = ["default-no-update", "self-update"]

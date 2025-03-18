@@ -1,9 +1,12 @@
 //! Utilities for capture output from tests run in a child process
 
+use crate::{
+    errors::{ChildError, ChildStartError, ErrorList},
+    reporter::events::ExecutionResult,
+};
 use bstr::{ByteSlice, Lines};
-use bytes::{Bytes, BytesMut};
-use std::borrow::Cow;
-use tokio::io::BufReader;
+use bytes::Bytes;
+use std::{borrow::Cow, sync::OnceLock};
 
 /// The strategy used to capture test executable output
 #[derive(Copy, Clone, PartialEq, Default, Debug)]
@@ -26,27 +29,50 @@ pub enum CaptureStrategy {
     None,
 }
 
-/// A single output for a test.
+/// A single output for a test or setup script: standard output, standard error, or a combined
+/// buffer.
 ///
 /// This is a wrapper around a [`Bytes`] that provides some convenience methods.
 #[derive(Clone, Debug)]
-pub struct TestSingleOutput {
+pub struct ChildSingleOutput {
     /// The raw output buffer
     pub buf: Bytes,
+
+    /// A string representation of the output, computed on first access.
+    ///
+    /// `None` means the output is valid UTF-8.
+    as_str: OnceLock<Option<Box<str>>>,
 }
 
-impl From<Bytes> for TestSingleOutput {
+impl From<Bytes> for ChildSingleOutput {
     #[inline]
     fn from(buf: Bytes) -> Self {
-        Self { buf }
+        Self {
+            buf,
+            as_str: OnceLock::new(),
+        }
     }
 }
 
-impl TestSingleOutput {
+impl ChildSingleOutput {
     /// Gets this output as a lossy UTF-8 string.
     #[inline]
-    pub fn to_str_lossy(&self) -> Cow<'_, str> {
-        String::from_utf8_lossy(&self.buf)
+    pub fn as_str_lossy(&self) -> &str {
+        let s = self
+            .as_str
+            .get_or_init(|| match String::from_utf8_lossy(&self.buf) {
+                // A borrowed string from `from_utf8_lossy` is always valid UTF-8. We can't store
+                // the `Cow` directly because that would be a self-referential struct. (Well, we
+                // could via a library like ouroboros, but that's really unnecessary.)
+                Cow::Borrowed(_) => None,
+                Cow::Owned(s) => Some(s.into_boxed_str()),
+            });
+
+        match s {
+            Some(s) => s,
+            // SAFETY: Immediately above, we've established that `None` means `buf` is valid UTF-8.
+            None => unsafe { std::str::from_utf8_unchecked(&self.buf) },
+        }
     }
 
     /// Iterates over lines in this output.
@@ -62,115 +88,72 @@ impl TestSingleOutput {
     }
 }
 
-/// The complete captured output of a child process
+/// The result of executing a child process: either that the process was run and
+/// at least some output was captured, or that the process could not be started
+/// at all.
 #[derive(Clone, Debug)]
-pub enum TestOutput {
-    /// The output was split into stdout and stderr.
-    Split {
-        /// The captured stdout.
-        stdout: TestSingleOutput,
+pub enum ChildExecutionOutput {
+    /// The process was run and the output was captured.
+    Output {
+        /// If the process has finished executing, the final state it is in.
+        ///
+        /// `None` means execution is currently in progress.
+        result: Option<ExecutionResult>,
 
-        /// The captured stderr.
-        stderr: TestSingleOutput,
+        /// The captured output.
+        output: ChildOutput,
+
+        /// Errors that occurred while waiting on the child process or parsing
+        /// its output.
+        errors: Option<ErrorList<ChildError>>,
     },
+
+    /// There was a failure to start the process.
+    StartError(ChildStartError),
+}
+
+impl ChildExecutionOutput {
+    /// Returns true if there are any errors in this output.
+    pub(crate) fn has_errors(&self) -> bool {
+        match self {
+            ChildExecutionOutput::Output { errors, result, .. } => {
+                if errors.is_some() {
+                    return true;
+                }
+                if let Some(result) = result {
+                    return !result.is_success();
+                }
+
+                false
+            }
+            ChildExecutionOutput::StartError(_) => true,
+        }
+    }
+}
+
+/// The output of a child process: stdout and/or stderr.
+///
+/// Part of [`ChildExecutionOutput`], and can be used independently as well.
+#[derive(Clone, Debug)]
+pub enum ChildOutput {
+    /// The output was split into stdout and stderr.
+    Split(ChildSplitOutput),
 
     /// The output was combined into stdout and stderr.
     Combined {
         /// The captured output.
-        output: TestSingleOutput,
-    },
-
-    /// The output was an execution failure.
-    ExecFail {
-        /// A single-line message.
-        message: String,
-
-        /// The full description, including other errors, to print out.
-        description: String,
+        output: ChildSingleOutput,
     },
 }
 
-/// The size of each buffered reader's buffer, and the size at which we grow
-/// the interleaved buffer.
+/// The output of a child process (test or setup script) with split stdout and stderr.
 ///
-/// This size is not totally arbitrary, but rather the (normal) page size on
-/// most linux, windows, and macos systems.
-const CHUNK_SIZE: usize = 4 * 1024;
+/// One of the variants of [`ChildOutput`].
+#[derive(Clone, Debug)]
+pub struct ChildSplitOutput {
+    /// The captured stdout, or `None` if the output was not captured.
+    pub stdout: Option<ChildSingleOutput>,
 
-use crate::errors::CollectTestOutputError as Err;
-
-/// Collects the stdout and/or stderr streams into a single buffer
-pub async fn collect_test_output(
-    streams: Option<crate::test_command::Output>,
-) -> Result<Option<TestOutput>, Err> {
-    use tokio::io::AsyncBufReadExt as _;
-
-    let Some(output) = streams else {
-        return Ok(None);
-    };
-
-    match output {
-        crate::test_command::Output::Split { stdout, stderr } => {
-            let mut stdout = BufReader::with_capacity(CHUNK_SIZE, stdout);
-            let mut stderr = BufReader::with_capacity(CHUNK_SIZE, stderr);
-
-            let mut stdout_acc = BytesMut::with_capacity(CHUNK_SIZE);
-            let mut stderr_acc = BytesMut::with_capacity(CHUNK_SIZE);
-
-            let mut out_done = false;
-            let mut err_done = false;
-
-            loop {
-                tokio::select! {
-                    res = stdout.fill_buf(), if !out_done => {
-                        let read = {
-                            let buf = res.map_err(Err::ReadStdout)?;
-                            stdout_acc.extend_from_slice(buf);
-                            buf.len()
-                        };
-
-                        stdout.consume(read);
-                        out_done = read == 0;
-                    }
-                    res = stderr.fill_buf(), if !err_done => {
-                        let read = {
-                            let buf = res.map_err(Err::ReadStderr)?;
-                            stderr_acc.extend_from_slice(buf);
-                            buf.len()
-                        };
-
-                        stderr.consume(read);
-                        err_done = read == 0;
-                    }
-                    else => break,
-                };
-            }
-
-            Ok(Some(TestOutput::Split {
-                stdout: stdout_acc.freeze().into(),
-                stderr: stderr_acc.freeze().into(),
-            }))
-        }
-        crate::test_command::Output::Combined(output) => {
-            let mut output = BufReader::with_capacity(CHUNK_SIZE, output);
-            let mut acc = BytesMut::with_capacity(CHUNK_SIZE);
-
-            loop {
-                let read = {
-                    let buf = output.fill_buf().await.map_err(Err::ReadStdout)?;
-                    acc.extend_from_slice(buf);
-                    buf.len()
-                };
-
-                output.consume(read);
-                if read == 0 {
-                    break;
-                }
-            }
-
-            Ok(Some(TestOutput::Combined {
-                output: acc.freeze().into(),
-            }))
-        }
-    }
+    /// The captured stderr, or `None` if the output was not captured.
+    pub stderr: Option<ChildSingleOutput>,
 }

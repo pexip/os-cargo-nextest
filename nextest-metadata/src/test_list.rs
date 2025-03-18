@@ -238,6 +238,9 @@ impl RustTestBinaryKind {
     /// The "bin" kind, used for unit tests within binaries.
     pub const BIN: Self = Self::new_const("bin");
 
+    /// The "example" kind, used for unit tests within examples.
+    pub const EXAMPLE: Self = Self::new_const("example");
+
     /// The "proc-macro" kind, used for tests within procedural macros.
     pub const PROC_MACRO: Self = Self::new_const("proc-macro");
 }
@@ -380,6 +383,9 @@ where
 impl Ord for RustBinaryId {
     fn cmp(&self, other: &RustBinaryId) -> Ordering {
         // Use the components as the canonical sort order.
+        //
+        // Note: this means that we can't impl Borrow<str> for RustBinaryId,
+        // since the Ord impl is inconsistent with that of &str.
         self.components().cmp(&other.components())
     }
 }
@@ -714,10 +720,15 @@ impl RustTestSuiteStatusSummary {
     pub const LISTED: Self = Self::new_const("listed");
 
     /// The "skipped" kind, which indicates that the test binary was not executed because it didn't
-    /// match any expression filters.
+    /// match any filtersets.
     ///
-    /// If this is "skipped", the contents of `RustTestSuiteSummary::test_cases` is empty.
+    /// In this case, the contents of [`RustTestSuiteSummary::test_cases`] is empty.
     pub const SKIPPED: Self = Self::new_const("skipped");
+
+    /// The binary doesn't match the profile's `default-filter`.
+    ///
+    /// This is the lowest-priority reason for skipping a binary.
+    pub const SKIPPED_DEFAULT_FILTER: Self = Self::new_const("skipped-default-filter");
 }
 
 /// Serializable information about an individual test case within a Rust test suite.
@@ -774,6 +785,11 @@ pub enum MismatchReason {
 
     /// This test is in a different partition.
     Partition,
+
+    /// This test is filtered out by the default-filter.
+    ///
+    /// This is the lowest-priority reason for skipping a test.
+    DefaultFilter,
 }
 
 impl fmt::Display for MismatchReason {
@@ -785,6 +801,9 @@ impl fmt::Display for MismatchReason {
                 write!(f, "does not match the provided expression filters")
             }
             MismatchReason::Partition => write!(f, "is in a different partition"),
+            MismatchReason::DefaultFilter => {
+                write!(f, "is filtered out by the profile's default-filter")
+            }
         }
     }
 }

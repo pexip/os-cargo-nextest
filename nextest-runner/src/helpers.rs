@@ -1,12 +1,21 @@
 // Copyright (c) The nextest Contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use crate::{list::Styles, runner::AbortStatus, write_str::WriteStr};
+use crate::{
+    config::ScriptId,
+    list::{Styles, TestInstanceId},
+    reporter::events::AbortStatus,
+    write_str::WriteStr,
+};
 use camino::{Utf8Path, Utf8PathBuf};
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Style};
 use std::{fmt, io, path::PathBuf, process::ExitStatus, time::Duration};
 
 pub(crate) mod plural {
+    pub(crate) fn were_plural_if(plural: bool) -> &'static str {
+        if plural { "were" } else { "was" }
+    }
+
     pub(crate) fn setup_scripts_str(count: usize) -> &'static str {
         if count == 1 {
             "setup script"
@@ -16,35 +25,23 @@ pub(crate) mod plural {
     }
 
     pub(crate) fn tests_str(count: usize) -> &'static str {
-        if count == 1 {
-            "test"
-        } else {
-            "tests"
-        }
+        tests_plural_if(count != 1)
+    }
+
+    pub(crate) fn tests_plural_if(plural: bool) -> &'static str {
+        if plural { "tests" } else { "test" }
     }
 
     pub(crate) fn binaries_str(count: usize) -> &'static str {
-        if count == 1 {
-            "binary"
-        } else {
-            "binaries"
-        }
+        if count == 1 { "binary" } else { "binaries" }
     }
 
     pub(crate) fn paths_str(count: usize) -> &'static str {
-        if count == 1 {
-            "path"
-        } else {
-            "paths"
-        }
+        if count == 1 { "path" } else { "paths" }
     }
 
     pub(crate) fn files_str(count: usize) -> &'static str {
-        if count == 1 {
-            "file"
-        } else {
-            "files"
-        }
+        if count == 1 { "file" } else { "files" }
     }
 
     pub(crate) fn directories_str(count: usize) -> &'static str {
@@ -64,11 +61,64 @@ pub(crate) mod plural {
     }
 
     pub(crate) fn libraries_str(count: usize) -> &'static str {
-        if count == 1 {
-            "library"
-        } else {
-            "libraries"
+        if count == 1 { "library" } else { "libraries" }
+    }
+}
+
+pub(crate) struct DisplayTestInstance<'a> {
+    instance: TestInstanceId<'a>,
+    styles: &'a Styles,
+}
+
+impl<'a> DisplayTestInstance<'a> {
+    pub(crate) fn new(instance: TestInstanceId<'a>, styles: &'a Styles) -> Self {
+        Self { instance, styles }
+    }
+}
+
+impl fmt::Display for DisplayTestInstance<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{} ",
+            self.instance.binary_id.style(self.styles.binary_id),
+        )?;
+        fmt_write_test_name(self.instance.test_name, self.styles, f)
+    }
+}
+
+pub(crate) struct DisplayScriptInstance {
+    script_id: ScriptId,
+    full_command: String,
+    script_id_style: Style,
+}
+
+impl DisplayScriptInstance {
+    pub(crate) fn new(
+        script_id: ScriptId,
+        command: &str,
+        args: &[String],
+        script_id_style: Style,
+    ) -> Self {
+        let full_command =
+            shell_words::join(std::iter::once(command).chain(args.iter().map(|arg| arg.as_ref())));
+
+        Self {
+            script_id,
+            full_command,
+            script_id_style,
         }
+    }
+}
+
+impl fmt::Display for DisplayScriptInstance {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}: {}",
+            self.script_id.style(self.script_id_style),
+            self.full_command,
+        )
     }
 }
 
@@ -94,12 +144,12 @@ pub(crate) fn write_test_name(
     Ok(())
 }
 
-/// Write out a test name, `std::io::Write` version.
-pub(crate) fn io_write_test_name(
+/// Write out a test name, `std::fmt::Write` version.
+pub(crate) fn fmt_write_test_name(
     name: &str,
     style: &Styles,
-    writer: &mut dyn io::Write,
-) -> io::Result<()> {
+    writer: &mut dyn fmt::Write,
+) -> fmt::Result {
     // Look for the part of the test after the last ::, if any.
     let mut splits = name.rsplitn(2, "::");
     let trailing = splits.next().expect("test should have at least 1 element");
@@ -205,7 +255,7 @@ pub(crate) fn convert_rel_path_to_main_sep(rel_path: &Utf8Path) -> Utf8PathBuf {
 pub(crate) fn rel_path_join(rel_path: &Utf8Path, path: &Utf8Path) -> Utf8PathBuf {
     assert!(rel_path.is_relative(), "rel_path {rel_path} is relative");
     assert!(path.is_relative(), "path {path} is relative",);
-    format!("{}/{}", rel_path, path).into()
+    format!("{rel_path}/{path}").into()
 }
 
 #[derive(Debug)]
@@ -222,29 +272,55 @@ impl fmt::Display for FormattedDuration {
     }
 }
 
-/// Extract the abort status from an exit status.
-pub(crate) fn extract_abort_status(exit_status: ExitStatus) -> Option<AbortStatus> {
-    cfg_if::cfg_if! {
-        if #[cfg(unix)] {
-            // On Unix, extract the signal if it's found.
-            use std::os::unix::process::ExitStatusExt;
-            exit_status.signal().map(AbortStatus::UnixSignal)
-        } else if #[cfg(windows)] {
-            exit_status.code().and_then(|code| {
-                (code < 0).then(|| AbortStatus::WindowsNtStatus(code))
-            })
-        } else {
-            None
+// "exited with"/"terminated via"
+pub(crate) fn display_exited_with(exit_status: ExitStatus) -> String {
+    match AbortStatus::extract(exit_status) {
+        Some(abort_status) => display_abort_status(abort_status),
+        None => match exit_status.code() {
+            Some(code) => format!("exited with exit code {}", code),
+            None => "exited with an unknown error".to_owned(),
+        },
+    }
+}
+
+/// Displays the abort status.
+pub(crate) fn display_abort_status(abort_status: AbortStatus) -> String {
+    match abort_status {
+        #[cfg(unix)]
+        AbortStatus::UnixSignal(sig) => match crate::helpers::signal_str(sig) {
+            Some(s) => {
+                format!("aborted with signal {sig} (SIG{s})")
+            }
+            None => {
+                format!("aborted with signal {sig}")
+            }
+        },
+        #[cfg(windows)]
+        AbortStatus::WindowsNtStatus(nt_status) => {
+            format!(
+                "aborted with code {}",
+                // TODO: pass down a style here
+                crate::helpers::display_nt_status(nt_status, Style::new())
+            )
         }
+        #[cfg(windows)]
+        AbortStatus::JobObject => "terminated via job object".to_string(),
     }
 }
 
 #[cfg(unix)]
 pub(crate) fn signal_str(signal: i32) -> Option<&'static str> {
-    // These signal numbers are the same on at least Linux, macOS and FreeBSD.
+    // These signal numbers are the same on at least Linux, macOS, FreeBSD and illumos.
+    //
+    // TODO: glibc has sigabbrev_np, and POSIX-1.2024 adds sig2str which has been available on
+    // illumos for many years:
+    // https://pubs.opengroup.org/onlinepubs/9799919799/functions/sig2str.html. We should use these
+    // if available.
     match signal {
         1 => Some("HUP"),
         2 => Some("INT"),
+        3 => Some("QUIT"),
+        4 => Some("ILL"),
         5 => Some("TRAP"),
         6 => Some("ABRT"),
         8 => Some("FPE"),
@@ -253,35 +329,37 @@ pub(crate) fn signal_str(signal: i32) -> Option<&'static str> {
         13 => Some("PIPE"),
         14 => Some("ALRM"),
         15 => Some("TERM"),
-        24 => Some("XCPU"),
-        25 => Some("XFSZ"),
-        26 => Some("VTALRM"),
-        27 => Some("PROF"),
         _ => None,
     }
 }
 
 #[cfg(windows)]
-pub(crate) fn display_nt_status(nt_status: windows_sys::Win32::Foundation::NTSTATUS) -> String {
+pub(crate) fn display_nt_status(
+    nt_status: windows_sys::Win32::Foundation::NTSTATUS,
+    bold_style: Style,
+) -> String {
+    // 10 characters ("0x" + 8 hex digits) is how an NTSTATUS with the high bit
+    // set is going to be displayed anyway. This makes all possible displays
+    // uniform.
+    let bolded_status = format!("{:#010x}", nt_status.style(bold_style));
     // Convert the NTSTATUS to a Win32 error code.
     let win32_code = unsafe { windows_sys::Win32::Foundation::RtlNtStatusToDosError(nt_status) };
 
     if win32_code == windows_sys::Win32::Foundation::ERROR_MR_MID_NOT_FOUND {
         // The Win32 code was not found.
-        return format!("{nt_status:#x} ({nt_status})");
+        return bolded_status;
     }
 
-    return format!(
-        "{:#x}: {}",
-        nt_status,
+    format!(
+        "{bolded_status}: {}",
         io::Error::from_raw_os_error(win32_code as i32)
-    );
+    )
 }
 
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct QuotedDisplay<'a, T: ?Sized>(pub(crate) &'a T);
 
-impl<'a, T: ?Sized> fmt::Display for QuotedDisplay<'a, T>
+impl<T: ?Sized> fmt::Display for QuotedDisplay<'_, T>
 where
     T: fmt::Display,
 {
@@ -296,7 +374,7 @@ extern "C" {
 }
 
 #[inline]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub(crate) fn statically_unreachable() -> ! {
     unsafe {
         __nextest_external_symbol_that_does_not_exist();
