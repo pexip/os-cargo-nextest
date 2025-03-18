@@ -1,3 +1,9 @@
+cargo-nextest (0.9.92+pexip24u1) pexip; urgency=medium
+
+  * New upstream release
+
+ -- Samuel Collins <samuel.collins@pexip.com>  Tue, 18 Mar 2025 14:35:44 +0000
+
 cargo-nextest (0.9.72+pexip24u1) pexip; urgency=medium
 
   * New upstream release
