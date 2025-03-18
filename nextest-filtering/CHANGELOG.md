@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.15.0] - 2025-02-24
+
+### Changed
+
+- Added support for rejecting unknown binary IDs.
+
+## [0.14.0] - 2025-02-10
+
+### Changed
+
+- Internal dependency update: winnow updated to 0.7. Thanks to [Ed Page](https://github.com/epage) for the update!
+
+## [0.13.0] - 2025-01-15
+
+### Changed
+
+- MSRV updated to Rust 1.81.
+- Internal dependency updates.
+
+## [0.12.0] - 2024-08-28
+
+### Changed
+
+- Renamed references from "default-set" to "default-filter" to match cargo-nextest changes.
+
+## [0.11.0] - 2024-08-25
+
+### Changed
+
+- Types renamed from `FilteringExpr` to `Filterset`.
+
+## [0.10.0] - 2024-08-23
+
+### Added
+
+- New APIs: `CompiledExpr::matches_binary` and `matches_test`.
+- Support for parsing default sets and the `default()` predicate.
+
+### Changed
+
+- `FilteringExpr::parse` now takes a `ParseContext`.
+- The `matches_binary` and `matches_test` functions now take an `EvalContext`.
+- MSRV updated to Rust 1.75.
+
 ## [0.9.0] - 2024-05-23
 
 ### Changed
@@ -109,6 +153,12 @@ For more information, see the changelog for [cargo-nextest 0.9.64](https://nexte
 
 Initial release.
 
+[0.15.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-filtering-0.15.0
+[0.14.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-filtering-0.14.0
+[0.13.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-filtering-0.13.0
+[0.12.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-filtering-0.12.0
+[0.11.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-filtering-0.11.0
+[0.10.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-filtering-0.10.0
 [0.9.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-filtering-0.9.0
 [0.8.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-filtering-0.8.0
 [0.7.1]: https://github.com/nextest-rs/nextest/releases/tag/nextest-filtering-0.7.1

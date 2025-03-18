@@ -5,6 +5,7 @@ use std::{
     io,
     os::windows::{ffi::OsStrExt as _, io::FromRawHandle as _, prelude::OwnedHandle},
     ptr::null_mut,
+    sync::OnceLock,
 };
 use windows_sys::Win32::{
     Foundation as fnd, Security::SECURITY_ATTRIBUTES, Storage::FileSystem as fs,
@@ -18,10 +19,10 @@ pub struct State {
 pub(super) fn setup_io(cmd: &mut std::process::Command) -> io::Result<State> {
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
-    static RANDOM_SEQ: once_cell::sync::OnceCell<AtomicUsize> = once_cell::sync::OnceCell::new();
+    static RANDOM_SEQ: OnceLock<AtomicUsize> = OnceLock::new();
     let rand_seq = RANDOM_SEQ.get_or_init(|| {
-        use rand::{rngs::OsRng, RngCore};
-        AtomicUsize::new(OsRng.next_u32() as _)
+        use rand::RngCore;
+        AtomicUsize::new(rand::rng().next_u32() as _)
     });
 
     // A 64kb pipe capacity is the same as a typical Linux default.
@@ -113,7 +114,7 @@ pub(super) fn setup_io(cmd: &mut std::process::Command) -> io::Result<State> {
             },
             fs::OPEN_EXISTING,
             0,
-            0,
+            null_mut(),
         );
 
         if handle == fnd::INVALID_HANDLE_VALUE {

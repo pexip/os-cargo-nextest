@@ -1,7 +1,7 @@
 // Copyright (c) The nextest Contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use serde::{de::IntoDeserializer, Deserialize};
+use serde::{Deserialize, de::IntoDeserializer};
 use std::{fmt, num::NonZeroUsize, time::Duration};
 
 /// Type for the slow-timeout config key.
@@ -79,11 +79,12 @@ where
 mod tests {
     use super::*;
     use crate::config::{
-        test_helpers::{build_platforms, temp_workspace},
         NextestConfig,
+        test_helpers::{build_platforms, temp_workspace},
     };
     use camino_tempfile::tempdir;
     use indoc::indoc;
+    use nextest_filtering::ParseContext;
     use test_case::test_case;
 
     #[test_case(
@@ -184,9 +185,11 @@ mod tests {
 
         let graph = temp_workspace(workspace_dir.path(), config_contents);
 
+        let pcx = ParseContext::new(&graph);
+
         let nextest_config_result = NextestConfig::from_sources(
             graph.workspace().root(),
-            &graph,
+            &pcx,
             None,
             &[][..],
             &Default::default(),

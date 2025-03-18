@@ -23,24 +23,88 @@
 //! `NEXTEST_BIN_EXE_cargo-nextest-dup`.
 
 use camino::{Utf8Path, Utf8PathBuf};
+use integration_tests::{
+    env::set_env_vars,
+    nextest_cli::{CargoNextestCli, CargoNextestOutput},
+};
 use nextest_metadata::{BuildPlatform, NextestExitCode, TestListSummary};
-use std::{fs::File, io::Write};
-use target_spec::Platform;
+use std::{borrow::Cow, fs::File, io::Write};
+use target_spec::{Platform, summaries::TargetFeaturesSummary};
 
 mod fixtures;
+mod stuck_signal;
 mod temp_project;
 
-use crate::temp_project::{create_uds, UdsStatus};
+use crate::temp_project::{UdsStatus, create_uds};
 use camino_tempfile::Utf8TempDir;
 use fixtures::*;
 use temp_project::TempProject;
+
+#[test]
+fn test_version_info() {
+    // Note that this is slightly overdetermined: details like the length of the short commit hash
+    // are not part of the format, and we have some flexibility in changing it.
+    let version_regex = regex::Regex::new(
+        r"^cargo-nextest (0\.9\.[0-9\-a-z\.]+) \(([a-f0-9]{9}) (\d{4}-\d{2}-\d{2})\)\n$",
+    )
+    .unwrap();
+
+    set_env_vars();
+
+    // First run nextest with -V to get a one-line version string.
+    let output = CargoNextestCli::for_test().args(["-V"]).output();
+    let short_stdout = output.stdout_as_str();
+    let captures = version_regex
+        .captures(&short_stdout)
+        .unwrap_or_else(|| panic!("short version matches regex: {short_stdout}"));
+
+    let version = captures.get(1).unwrap().as_str();
+    let short_hash = captures.get(2).unwrap().as_str();
+    let date = captures.get(3).unwrap().as_str();
+
+    let output = CargoNextestCli::for_test().args(["--version"]).output();
+    let long_stdout = output.stdout_as_str();
+
+    // Check that all expected lines are found.
+    let mut lines = long_stdout.lines();
+
+    // Line 1 is the version line. Check that it matches the short version line.
+    let version_line = lines.next().unwrap();
+    assert_eq!(
+        version_line,
+        short_stdout.trim_end(),
+        "long version line 1 matches short version"
+    );
+
+    // Line 2 is of the form "release: 0.9.0".
+    let release_line = lines.next().unwrap();
+    assert_eq!(release_line, format!("release: {}", version));
+
+    // Line 3 is the commit hash.
+    let commit_hash_line = lines.next().unwrap();
+    assert!(
+        commit_hash_line.starts_with(&format!("commit-hash: {}", short_hash)),
+        "commit hash line matches short hash: {commit_hash_line}"
+    );
+
+    // Line 4 is the commit date.
+    let commit_date_line = lines.next().unwrap();
+    assert_eq!(commit_date_line, format!("commit-date: {}", date));
+
+    // Line 5 is the host. Just check that it begins with "host: ".
+    let host_line = lines.next().unwrap();
+    assert!(
+        host_line.starts_with("host: "),
+        "host line starts with 'host: ': {host_line}"
+    );
+}
 
 #[test]
 fn test_list_default() {
     set_env_vars();
     let p = TempProject::new().unwrap();
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -60,7 +124,7 @@ fn test_list_full() {
     set_env_vars();
     let p = TempProject::new().unwrap();
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -71,6 +135,9 @@ fn test_list_full() {
             "json",
             "--list-type",
             "full",
+            // These are left in for debugging and are generally quite useful.
+            "--cargo-verbose",
+            "--cargo-verbose",
         ])
         .output();
 
@@ -82,7 +149,7 @@ fn test_list_binaries_only() {
     set_env_vars();
     let p = TempProject::new().unwrap();
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -97,6 +164,38 @@ fn test_list_binaries_only() {
         .output();
 
     check_list_binaries_output(&output.stdout);
+
+    // Check error messages for unknown binary IDs.
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "list",
+            "--cargo-quiet",
+            "--workspace",
+            "--all-targets",
+            "--message-format",
+            "json",
+            "--list-type",
+            "binaries-only",
+            // Doesn't exist.
+            "-E",
+            "binary(unknown) & binary_id(unknown) & binary(=unknown) | binary_id(=unknown)",
+            // Does exist.
+            "-E",
+            "binary_id(with-build-script) | binary_id(=with-build-script) | \
+             binary(nextest-tests) | binary(=nextest-tests)",
+            // First one doesn't exist, second one does.
+            "-E",
+            "binary_id(nextest-tests::does_not_exist) | binary_id(=nextest-tests::basic)",
+            // First one exists, second one doesn't.
+            "-E",
+            "binary_id(nextest-tests::example/*) | binary_id(dylib-test::example/*)",
+        ])
+        .unchecked(true)
+        .output();
+
+    insta::assert_snapshot!(output.stderr_as_str());
 }
 
 #[test]
@@ -111,7 +210,7 @@ fn test_target_dir() {
     let run_check = |target_dir: &str, extra_args: Vec<&str>| {
         // The test is for the target directory more than for any specific package, so pick a
         // package that builds quickly.
-        let output = CargoNextestCli::new()
+        let output = CargoNextestCli::for_test()
             .args(["list", "-p", "cdylib-example", "--message-format", "json"])
             .args(extra_args)
             .output();
@@ -163,9 +262,9 @@ fn test_list_full_after_build() {
     set_env_vars();
 
     let p = TempProject::new().unwrap();
-    build_tests(&p);
+    save_binaries_metadata(&p);
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -185,9 +284,9 @@ fn test_list_host_after_build() {
     set_env_vars();
 
     let p = TempProject::new().unwrap();
-    build_tests(&p);
+    save_binaries_metadata(&p);
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -209,9 +308,9 @@ fn test_list_target_after_build() {
     set_env_vars();
 
     let p = TempProject::new().unwrap();
-    build_tests(&p);
+    save_binaries_metadata(&p);
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -229,12 +328,105 @@ fn test_list_target_after_build() {
 }
 
 #[test]
+fn test_run_no_tests() {
+    set_env_vars();
+
+    let p = TempProject::new().unwrap();
+    save_binaries_metadata(&p);
+
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "-E",
+            "none()",
+        ])
+        .unchecked(true)
+        .output();
+
+    assert_eq!(
+        output.exit_status.code(),
+        Some(NextestExitCode::NO_TESTS_RUN),
+        "correct exit code for command\n{output}"
+    );
+
+    let stderr = output.stderr_as_str();
+    assert!(
+        stderr.contains("Starting 0 tests across 0 binaries (7 binaries skipped)"),
+        "stderr contains 'Starting' message: {output}"
+    );
+    assert!(
+        stderr.contains("error: no tests to run\n(hint: use `--no-tests` to customize)"),
+        "stderr contains no tests message: {output}"
+    );
+
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "-E",
+            "none()",
+            "--no-tests",
+            "warn",
+        ])
+        .output();
+
+    let stderr = output.stderr_as_str();
+    assert!(
+        stderr.contains("warning: no tests to run"),
+        "stderr contains no tests message: {output}"
+    );
+
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "-E",
+            "none()",
+            "--no-tests=fail",
+        ])
+        .unchecked(true)
+        .output();
+    assert_eq!(
+        output.exit_status.code(),
+        Some(NextestExitCode::NO_TESTS_RUN),
+        "correct exit code for command\n{output}"
+    );
+
+    let stderr = output.stderr_as_str();
+    assert!(
+        stderr.contains("error: no tests to run"),
+        "stderr contains no tests message: {output}"
+    );
+
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "-E",
+            "none()",
+            "--no-tests=pass",
+        ])
+        .output();
+
+    let stderr = output.stderr_as_str();
+    assert!(
+        !stderr.contains("no tests to run"),
+        "no tests message does not error out, stderr: {output}"
+    );
+}
+
+#[test]
 fn test_run() {
     set_env_vars();
 
     let p = TempProject::new().unwrap();
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -250,7 +442,195 @@ fn test_run() {
         Some(NextestExitCode::TEST_RUN_FAILED),
         "correct exit code for command\n{output}"
     );
-    check_run_output(&output.stderr, false);
+    check_run_output(&output.stderr, 0);
+
+    // --exact with nothing else should be the same as above.
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "--exact",
+        ])
+        .unchecked(true)
+        .output();
+
+    assert_eq!(
+        output.exit_status.code(),
+        Some(NextestExitCode::TEST_RUN_FAILED),
+        "correct exit code for command\n{output}"
+    );
+    check_run_output(&output.stderr, 0);
+
+    // Check the output with --skip.
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "--skip",
+            "cdylib",
+        ])
+        .unchecked(true)
+        .output();
+    assert_eq!(
+        output.exit_status.code(),
+        Some(NextestExitCode::TEST_RUN_FAILED),
+        "correct exit code for command\n{output}"
+    );
+    check_run_output(&output.stderr, RunProperty::WithSkipCdylibFilter as u64);
+
+    // Equivalent filterset to the above.
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "--workspace",
+            "--all-targets",
+            "-E",
+            "not test(cdylib)",
+        ])
+        .unchecked(true)
+        .output();
+    assert_eq!(
+        output.exit_status.code(),
+        Some(NextestExitCode::TEST_RUN_FAILED),
+        "correct exit code for command\n{output}"
+    );
+    check_run_output(&output.stderr, RunProperty::WithSkipCdylibFilter as u64);
+
+    // Check the output with --exact.
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "test_multiply_two",
+            "--exact",
+            "tests::test_multiply_two_cdylib",
+        ])
+        // The above tests pass so don't pass in unchecked(true) here.
+        .output();
+    check_run_output(
+        &output.stderr,
+        RunProperty::WithMultiplyTwoExactFilter as u64,
+    );
+
+    // Equivalent filterset to the above.
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "--workspace",
+            "--all-targets",
+            "-E",
+            "test(=test_multiply_two) | test(=tests::test_multiply_two_cdylib)",
+        ])
+        // The above tests pass so don't pass in unchecked(true) here.
+        .output();
+    check_run_output(
+        &output.stderr,
+        RunProperty::WithMultiplyTwoExactFilter as u64,
+    );
+
+    // Check the output with --exact and --skip.
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "test_multiply_two",
+            // Note the position of --exact doesn't matter.
+            "--exact",
+            "tests::test_multiply_two_cdylib",
+            "--skip",
+            "tests::test_multiply_two_cdylib",
+        ])
+        // This should only select the one test_multiply_two test, which pass. So don't pass in
+        // unchecked(true) here.
+        .output();
+    check_run_output(
+        &output.stderr,
+        RunProperty::WithSkipCdylibFilter as u64 | RunProperty::WithMultiplyTwoExactFilter as u64,
+    );
+
+    // Equivalent filterset to the above.
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "--workspace",
+            "--all-targets",
+            "-E",
+            "(test(=test_multiply_two) | test(=tests::test_multiply_two_cdylib)) & not test(=tests::test_multiply_two_cdylib)",
+        ])
+        // This should only select the test_multiply_two test, which passes. So don't pass in
+        // unchecked(true) here.
+        .output();
+    check_run_output(
+        &output.stderr,
+        RunProperty::WithSkipCdylibFilter as u64 | RunProperty::WithMultiplyTwoExactFilter as u64,
+    );
+
+    // Another equivalent.
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "--workspace",
+            "--all-targets",
+            "-E",
+            "test(=test_multiply_two) | test(=tests::test_multiply_two_cdylib)",
+            "--",
+            "--skip",
+            "cdylib",
+        ])
+        // This should only select the test_multiply_two test, which passes. So don't pass in
+        // unchecked(true) here.
+        .output();
+    check_run_output(
+        &output.stderr,
+        RunProperty::WithSkipCdylibFilter as u64 | RunProperty::WithMultiplyTwoExactFilter as u64,
+    );
+
+    // Yet another equivalent.
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "--workspace",
+            "--all-targets",
+            "-E",
+            "not test(cdylib)",
+            "--",
+            "test_multiply_two",
+            "--exact",
+            "tests::test_multiply_two_cdylib",
+        ])
+        // This should only select the test_multiply_two test, which passes. So don't pass in
+        // unchecked(true) here.
+        .output();
+    check_run_output(
+        &output.stderr,
+        RunProperty::WithSkipCdylibFilter as u64 | RunProperty::WithMultiplyTwoExactFilter as u64,
+    );
 }
 
 #[test]
@@ -258,9 +638,9 @@ fn test_run_after_build() {
     set_env_vars();
 
     let p = TempProject::new().unwrap();
-    build_tests(&p);
+    save_binaries_metadata(&p);
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -276,7 +656,7 @@ fn test_run_after_build() {
         Some(NextestExitCode::TEST_RUN_FAILED),
         "correct exit code for command\n{output}"
     );
-    check_run_output(&output.stderr, false);
+    check_run_output(&output.stderr, 0);
 }
 
 #[test]
@@ -284,21 +664,20 @@ fn test_relocated_run() {
     set_env_vars();
 
     let custom_target_dir = Utf8TempDir::new().unwrap();
-    let custom_target_path = custom_target_dir.path();
-    let p = TempProject::new_custom_target_dir(custom_target_path).unwrap();
-
-    build_tests(&p);
+    let custom_target_path = custom_target_dir.path().join("target");
+    let p = TempProject::new_custom_target_dir(&custom_target_path).unwrap();
+    save_binaries_metadata(&p);
     save_cargo_metadata(&p);
 
     let mut p2 = TempProject::new().unwrap();
-    let new_target_path = p2.workspace_root().join("test-subdir");
+    let new_target_path = p2.workspace_root().join("test-subdir/target");
 
     // copy target directory over
     std::fs::create_dir_all(&new_target_path).unwrap();
-    temp_project::copy_dir_all(custom_target_path, &new_target_path, false).unwrap();
+    temp_project::copy_dir_all(&custom_target_path, &new_target_path, false).unwrap();
     // Remove the old target path to ensure that any tests that refer to files within it
     // fail.
-    std::fs::remove_dir_all(custom_target_path).unwrap();
+    std::fs::remove_dir_all(&custom_target_path).unwrap();
 
     p2.set_target_dir(new_target_path);
 
@@ -314,7 +693,7 @@ fn test_relocated_run() {
 
     // Run relocated tests
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p2.manifest_path().as_str(),
@@ -336,7 +715,58 @@ fn test_relocated_run() {
         Some(NextestExitCode::TEST_RUN_FAILED),
         "correct exit code for command\n{output}"
     );
-    check_run_output(&output.stderr, true);
+    check_run_output(&output.stderr, RunProperty::Relocated as u64);
+}
+
+#[test]
+fn test_run_with_priorities() {
+    set_env_vars();
+
+    let p = TempProject::new().unwrap();
+
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "--workspace",
+            "--all-targets",
+            "-j1",
+            "--profile",
+            "with-priorities",
+        ])
+        .unchecked(true)
+        // The above tests pass so don't pass in unchecked(true) here.
+        .output();
+
+    assert_eq!(
+        output.exit_status.code(),
+        Some(NextestExitCode::TEST_RUN_FAILED),
+        "correct exit code for command\n{output}",
+    );
+
+    // -j1 means the tests should always run in the order specified in
+    // `with-priorities`: `test_success`, then `test_flaky_mod_4`, then
+    // `test_cargo_env_vars`.
+    let stderr = output.stderr_as_str();
+    let test_success = stderr
+        .find("nextest-tests::basic test_success")
+        .expect("test_success is present in output");
+    let test_flaky_mod_4 = stderr
+        .find("nextest-tests::basic test_flaky_mod_4")
+        .expect("test_flaky_mod_4 is present in output");
+    let test_cargo_env_vars = stderr
+        .find("nextest-tests::basic test_cargo_env_vars")
+        .expect("test_cargo_env_vars is present in output");
+
+    assert!(
+        test_success < test_flaky_mod_4,
+        "test_success runs before test_flaky_mod_4\n{output}"
+    );
+    assert!(
+        test_flaky_mod_4 < test_cargo_env_vars,
+        "test_flaky_mod_4 runs before test_cargo_env_vars\n{output}"
+    );
 }
 
 #[test]
@@ -356,7 +786,7 @@ fn test_run_from_archive_with_no_includes() {
         _ = extracted_target
             .join(path)
             .symlink_metadata()
-            .map(|_| panic!("file {} must not be included in the archive", path));
+            .map(|_| panic!("file {path} must not be included in the archive"));
     }
 }
 
@@ -384,7 +814,7 @@ archive.include = [
 
     // The included file should be present, but the excluded file should not.
     for path in [INCLUDED_PATH, TOP_LEVEL_FILE] {
-        let contents = std::fs::read_to_string(&extracted_target.join(path))
+        let contents = std::fs::read_to_string(extracted_target.join(path))
             .expect("extra file written to archive");
         assert_eq!(contents, "a test string");
     }
@@ -393,7 +823,7 @@ archive.include = [
         _ = extracted_target
             .join(path)
             .symlink_metadata()
-            .map(|_| panic!("file {} must not be included in the archive", path));
+            .map(|_| panic!("file {path} must not be included in the archive"));
     }
 }
 
@@ -430,8 +860,8 @@ fn create_archive(
     snapshot_name: &str,
 ) -> Result<(TempProject, Utf8PathBuf), CargoNextestOutput> {
     let custom_target_dir = Utf8TempDir::new().unwrap();
-    let custom_target_path = custom_target_dir.path();
-    let p = TempProject::new_custom_target_dir(custom_target_path).unwrap();
+    let custom_target_path = custom_target_dir.path().join("target");
+    let p = TempProject::new_custom_target_dir(&custom_target_path).unwrap();
 
     let config_path = p.workspace_root().join(".config/nextest.toml");
     std::fs::write(config_path, config_contents).unwrap();
@@ -463,7 +893,7 @@ fn create_archive(
     let archive_file = p.temp_root().join("my-archive.tar.zst");
 
     // Write the archive to the archive_file above.
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -479,6 +909,9 @@ fn create_archive(
             "--cargo-quiet",
         ])
         .env("__NEXTEST_REDACT", "1")
+        // Used for linked path testing. See comment in
+        // binary_list.rs:detect_linked_path.
+        .env("__NEXTEST_ALT_TARGET_DIR", p.orig_target_dir())
         .unchecked(true)
         .output();
 
@@ -508,7 +941,7 @@ fn run_archive(archive_file: &Utf8Path) -> (TempProject, Utf8PathBuf) {
     let extract_to = p2.workspace_root().join("extract_to");
     std::fs::create_dir_all(&extract_to).unwrap();
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "run",
             "--archive-file",
@@ -526,7 +959,7 @@ fn run_archive(archive_file: &Utf8Path) -> (TempProject, Utf8PathBuf) {
         Some(NextestExitCode::TEST_RUN_FAILED),
         "correct exit code for command\n{output}"
     );
-    check_run_output(&output.stderr, true);
+    check_run_output(&output.stderr, RunProperty::Relocated as u64);
 
     // project is included in return value to keep tempdirs alive
     (p2, extract_to.join("target"))
@@ -537,7 +970,7 @@ fn test_show_config_test_groups() {
     set_env_vars();
     let p = TempProject::new().unwrap();
 
-    let default_profile_output = CargoNextestCli::new()
+    let default_profile_output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -550,7 +983,7 @@ fn test_show_config_test_groups() {
 
     insta::assert_snapshot!(default_profile_output.stdout_as_str());
 
-    let default_profile_all_output = CargoNextestCli::new()
+    let default_profile_all_output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -564,7 +997,7 @@ fn test_show_config_test_groups() {
 
     insta::assert_snapshot!(default_profile_all_output.stdout_as_str());
 
-    let with_retries_output = CargoNextestCli::new()
+    let with_retries_output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -578,7 +1011,7 @@ fn test_show_config_test_groups() {
 
     insta::assert_snapshot!(with_retries_output.stdout_as_str());
 
-    let with_retries_all_output = CargoNextestCli::new()
+    let with_retries_all_output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -593,7 +1026,7 @@ fn test_show_config_test_groups() {
 
     insta::assert_snapshot!(with_retries_all_output.stdout_as_str());
 
-    let with_termination_output = CargoNextestCli::new()
+    let with_termination_output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -607,7 +1040,7 @@ fn test_show_config_test_groups() {
 
     insta::assert_snapshot!(with_termination_output.stdout_as_str());
 
-    let with_termination_all_output = CargoNextestCli::new()
+    let with_termination_all_output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -624,6 +1057,213 @@ fn test_show_config_test_groups() {
 }
 
 #[test]
+fn test_list_with_default_filter() {
+    set_env_vars();
+    let p = TempProject::new().unwrap();
+
+    // Show the output of the default filter (does not include tests not in default-filter).
+    let default_set_output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "list",
+            "--profile=with-default-filter",
+            "--workspace",
+            "--all-targets",
+        ])
+        .output();
+    insta::assert_snapshot!(
+        "list_with_default_set_basic",
+        default_filter_stdout(&default_set_output)
+    );
+
+    // Show the output with -E 'all()' (does not include tests not in default-filter).
+    let all_tests_output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "list",
+            "--profile=with-default-filter",
+            "-E",
+            "all()",
+            "--workspace",
+            "--all-targets",
+        ])
+        .output();
+    insta::assert_snapshot!(
+        "list_with_default_set_expr_all",
+        default_filter_stdout(&all_tests_output)
+    );
+
+    // Show the output with --ignore-default-filter (does include tests not in default-filter).
+    let bound_all_output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "list",
+            "--profile=with-default-filter",
+            "--workspace",
+            "--all-targets",
+            "--ignore-default-filter",
+        ])
+        .output();
+    insta::assert_snapshot!(
+        "list_with_default_set_bound_all",
+        bound_all_output.stdout_as_str()
+    );
+
+    // -E 'default()' --ignore-default-filter (same as no arguments).
+    let default_tests_output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "list",
+            "--profile=with-default-filter",
+            "-E",
+            "default()",
+            "--ignore-default-filter",
+            "--workspace",
+            "--all-targets",
+        ])
+        .output();
+    insta::assert_snapshot!(
+        "list_with_default_set_expr_default",
+        default_filter_stdout(&default_tests_output)
+    );
+    assert_eq!(
+        default_tests_output.stdout_as_str(),
+        default_set_output.stdout_as_str(),
+        "default() and no arguments are the same"
+    );
+
+    // -E 'package(cdylib-example)' (empty)
+    let package_example_output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "list",
+            "--profile=with-default-filter",
+            "-E",
+            "package(cdylib-example)",
+            "--workspace",
+            "--all-targets",
+        ])
+        .output();
+    insta::assert_snapshot!(
+        "list_with_default_set_expr_package",
+        package_example_output.stdout_as_str(),
+    );
+
+    // -E 'package(cdylib-example)' --ignore-default-filter (includes cdylib-example).
+    let package_example_bound_all_output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "list",
+            "--profile=with-default-filter",
+            "-E",
+            "package(cdylib-example)",
+            "--ignore-default-filter",
+            "--workspace",
+            "--all-targets",
+        ])
+        .output();
+    insta::assert_snapshot!(
+        "list_with_default_set_expr_package_bound_all",
+        package_example_bound_all_output.stdout_as_str(),
+    );
+
+    // With additional regular arguments passed in (should be affected by the default fitler).
+    let with_args_output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "list",
+            "--profile=with-default-filter",
+            "test_stdin_closed",
+            "cdylib",
+            "--workspace",
+            "--all-targets",
+        ])
+        .output();
+    insta::assert_snapshot!(
+        "list_with_default_set_args",
+        with_args_output.stdout_as_str(),
+    );
+
+    // With --ignore-default-filter.
+    let with_args_bound_all_output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "list",
+            "--profile=with-default-filter",
+            "test_stdin_closed",
+            "cdylib",
+            "--workspace",
+            "--all-targets",
+            "--ignore-default-filter",
+        ])
+        .output();
+    insta::assert_snapshot!(
+        "list_with_default_set_args_bound_all",
+        with_args_bound_all_output.stdout_as_str(),
+    );
+}
+
+#[cfg(unix)]
+fn default_filter_stdout(output: &CargoNextestOutput) -> Cow<'_, str> {
+    output.stdout_as_str()
+}
+
+#[cfg(not(unix))]
+#[track_caller]
+fn default_filter_stdout(output: &CargoNextestOutput) -> Cow<'_, str> {
+    // On Unix platforms, we additionally filter out `test_cargo_env_vars` here
+    // as a test. Ensure that on non-Unix platforms it is present in the output,
+    // and remove it from the output.
+    let stdout = output.stdout_as_str();
+    assert!(
+        stdout.contains("test_cargo_env_vars"),
+        "test_cargo_env_vars should be in the output:\n------\n{output}"
+    );
+
+    itertools::Itertools::intersperse(
+        stdout
+            .lines()
+            .filter(|line| !line.contains("test_cargo_env_vars")),
+        "\n",
+    )
+    .chain(std::iter::once("\n"))
+    .collect()
+}
+
+#[test]
+fn test_run_with_default_filter() {
+    set_env_vars();
+    let p = TempProject::new().unwrap();
+
+    let output = CargoNextestCli::for_test()
+        .args([
+            "--manifest-path",
+            p.manifest_path().as_str(),
+            "run",
+            "--profile=with-default-filter",
+            "--workspace",
+            "--all-targets",
+        ])
+        .unchecked(true)
+        .output();
+
+    assert_eq!(
+        output.exit_status.code(),
+        Some(NextestExitCode::TEST_RUN_FAILED),
+        "correct exit code for command\n{output}"
+    );
+    check_run_output(&output.stderr, RunProperty::WithDefaultFilter as u64);
+}
+
+#[test]
 fn test_show_config_version() {
     set_env_vars();
     let p = TempProject::new().unwrap();
@@ -633,7 +1273,7 @@ fn test_show_config_version() {
 
     // Required 0.9.56, recommended 0.9.54.
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -645,7 +1285,7 @@ fn test_show_config_version() {
 
     insta::assert_snapshot!(output.stdout_as_str());
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -662,7 +1302,7 @@ fn test_show_config_version() {
     );
     insta::assert_snapshot!(output.stdout_as_str());
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -679,7 +1319,7 @@ fn test_show_config_version() {
     );
     insta::assert_snapshot!(output.stdout_as_str());
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -696,7 +1336,7 @@ fn test_show_config_version() {
     );
     insta::assert_snapshot!(output.stdout_as_str());
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -716,7 +1356,7 @@ fn test_show_config_version() {
     // ---
     // With --override-version-check
     // ---
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -729,7 +1369,7 @@ fn test_show_config_version() {
 
     insta::assert_snapshot!(output.stdout_as_str());
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -760,7 +1400,7 @@ fn test_show_config_version() {
     f.flush().unwrap();
     std::mem::drop(f);
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -792,7 +1432,7 @@ fn test_setup_scripts_not_enabled() {
     }
     std::fs::write(&config_path, out).unwrap();
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args(["run", "--manifest-path", p.manifest_path().as_str()])
         .unchecked(true)
         .output();
@@ -808,7 +1448,7 @@ fn test_setup_script_error() {
     set_env_vars();
     let p = TempProject::new().unwrap();
 
-    let output = CargoNextestCli::new()
+    let output = CargoNextestCli::for_test()
         .args(["run", "--manifest-path", p.manifest_path().as_str()])
         .env("__NEXTEST_SETUP_SCRIPT_ERROR", "1")
         .unchecked(true)
@@ -816,7 +1456,8 @@ fn test_setup_script_error() {
 
     assert_eq!(
         output.exit_status.code(),
-        Some(NextestExitCode::SETUP_SCRIPT_FAILED)
+        Some(NextestExitCode::SETUP_SCRIPT_FAILED),
+        "expected exit code to be SETUP_SCRIPT_FAILED\noutput: {output}",
     );
 }
 
@@ -825,9 +1466,10 @@ fn test_target_arg() {
     set_env_vars();
     let p = TempProject::new().unwrap();
 
-    let host_platform = Platform::current().expect("should detect the host target successfully");
-    let host_triple = host_platform.triple_str();
-    let output = CargoNextestCli::new()
+    let build_target_platform =
+        Platform::build_target().expect("should detect the host target successfully");
+    let host_triple = build_target_platform.triple_str();
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -843,10 +1485,110 @@ fn test_target_arg() {
         .rust_build_meta
         .platforms
         .expect("should have the platforms field");
-    assert_eq!(build_platforms.host.platform, host_platform.to_summary());
+
+    // Target features get reset to unknown, unfortunately, so we can't compare
+    // the full platform.
+    let mut summary = build_target_platform.to_summary();
+    summary.target_features = TargetFeaturesSummary::Unknown;
+    assert_eq!(build_platforms.host.platform, summary);
+
     assert_eq!(build_platforms.targets[0].platform.triple, host_triple);
     assert_eq!(
         build_platforms.targets[0].libdir,
         build_platforms.host.libdir
     );
+}
+
+#[test]
+fn test_rustc_version_verbose_errors() {
+    set_env_vars();
+
+    // Set RUSTC to the shim.
+    let shim_rustc = std::env::var("NEXTEST_BIN_EXE_rustc-shim").unwrap();
+
+    let mut command = CargoNextestCli::for_test();
+    command
+        .args(["debug", "build-platforms", "--output-format", "triple"])
+        .env("RUSTC", &shim_rustc);
+
+    // --- Error cases ---
+    {
+        let mut command = command.clone();
+        command
+            .env("__NEXTEST_RUSTC_SHIM_VERSION_VERBOSE_ERROR", "non-zero")
+            .env("__NEXTEST_FORCE_BUILD_TARGET", "error");
+        insta::assert_snapshot!(
+            "rustc_vv_non_zero",
+            command.unchecked(true).output().to_snapshot()
+        );
+    }
+
+    {
+        let mut command = command.clone();
+        command
+            .env(
+                "__NEXTEST_RUSTC_SHIM_VERSION_VERBOSE_ERROR",
+                "invalid-stdout",
+            )
+            .env("__NEXTEST_FORCE_BUILD_TARGET", "error");
+        insta::assert_snapshot!(
+            "rustc_vv_invalid_stdout",
+            command.unchecked(true).output().to_snapshot()
+        );
+    }
+
+    {
+        let mut command = command.clone();
+        command
+            .env(
+                "__NEXTEST_RUSTC_SHIM_VERSION_VERBOSE_ERROR",
+                "invalid-triple",
+            )
+            .env("__NEXTEST_FORCE_BUILD_TARGET", "error");
+
+        insta::assert_snapshot!(
+            "rustc_vv_invalid_triple",
+            command.unchecked(true).output().to_snapshot()
+        );
+    }
+
+    // --- Warning cases ---
+    {
+        let mut command = command.clone();
+        command
+            .env("__NEXTEST_RUSTC_SHIM_VERSION_VERBOSE_ERROR", "non-zero")
+            .env("__NEXTEST_FORCE_BUILD_TARGET", "x86_64-unknown-linux-gnu");
+        insta::assert_snapshot!(
+            "rustc_vv_non_zero_warning",
+            command.unchecked(true).output().to_snapshot()
+        );
+    }
+
+    {
+        let mut command = command.clone();
+        command
+            .env(
+                "__NEXTEST_RUSTC_SHIM_VERSION_VERBOSE_ERROR",
+                "invalid-stdout",
+            )
+            .env("__NEXTEST_FORCE_BUILD_TARGET", "x86_64-unknown-linux-gnu");
+        insta::assert_snapshot!(
+            "rustc_vv_invalid_stdout_warning",
+            command.unchecked(true).output().to_snapshot()
+        );
+    }
+
+    {
+        let mut command = command.clone();
+        command
+            .env(
+                "__NEXTEST_RUSTC_SHIM_VERSION_VERBOSE_ERROR",
+                "invalid-triple",
+            )
+            .env("__NEXTEST_FORCE_BUILD_TARGET", "x86_64-unknown-linux-gnu");
+        insta::assert_snapshot!(
+            "rustc_vv_invalid_triple_warning",
+            command.unchecked(true).output().to_snapshot()
+        );
+    }
 }

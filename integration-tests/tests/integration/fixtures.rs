@@ -2,278 +2,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::temp_project::TempProject;
-use camino::Utf8PathBuf;
-use color_eyre::Result;
+use fixture_data::{
+    models::{TestCaseFixtureProperty, TestCaseFixtureStatus, TestSuiteFixtureProperty},
+    nextest_tests::EXPECTED_TEST_SUITES,
+};
+use integration_tests::nextest_cli::{CargoNextestCli, cargo_bin};
 use nextest_metadata::{
-    BinaryListSummary, BuildPlatform, RustBinaryId, RustTestSuiteStatusSummary, TestListSummary,
+    BinaryListSummary, BuildPlatform, RustTestSuiteStatusSummary, TestListSummary,
 };
-use once_cell::sync::Lazy;
 use regex::Regex;
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    ffi::OsString,
-    fmt,
-    process::{Command, ExitStatus},
-};
-
-pub struct TestInfo {
-    id: RustBinaryId,
-    platform: BuildPlatform,
-    // The bool represents whether the test is ignored.
-    test_cases: Vec<(&'static str, bool)>,
-}
-
-impl TestInfo {
-    fn new(
-        id: &'static str,
-        platform: BuildPlatform,
-        test_cases: Vec<(&'static str, bool)>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            platform,
-            test_cases,
-        }
-    }
-}
-
-pub static EXPECTED_LIST: Lazy<Vec<TestInfo>> = Lazy::new(|| {
-    vec![
-        TestInfo::new(
-            "cdylib-example",
-            BuildPlatform::Target,
-            vec![("tests::test_multiply_two_cdylib", false)],
-        ),
-        TestInfo::new(
-            "cdylib-link",
-            BuildPlatform::Target,
-            vec![("test_multiply_two", false)],
-        ),
-        TestInfo::new("dylib-test", BuildPlatform::Target, vec![]),
-        TestInfo::new(
-            "nextest-tests::basic",
-            BuildPlatform::Target,
-            vec![
-                ("test_cargo_env_vars", false),
-                ("test_cwd", false),
-                ("test_execute_bin", false),
-                ("test_failure_assert", false),
-                ("test_failure_error", false),
-                ("test_failure_should_panic", false),
-                ("test_flaky_mod_4", false),
-                ("test_flaky_mod_6", false),
-                ("test_ignored", true),
-                ("test_ignored_fail", true),
-                ("test_result_failure", false),
-                ("test_slow_timeout", true),
-                ("test_slow_timeout_2", true),
-                ("test_slow_timeout_subprocess", true),
-                ("test_stdin_closed", false),
-                ("test_subprocess_doesnt_exit", false),
-                ("test_success", false),
-                ("test_success_should_panic", false),
-            ],
-        ),
-        TestInfo::new(
-            "nextest-derive",
-            BuildPlatform::Host,
-            vec![("it_works", false)],
-        ),
-        TestInfo::new(
-            "nextest-tests::bench/my-bench",
-            BuildPlatform::Target,
-            vec![("bench_add_two", false), ("tests::test_execute_bin", false)],
-        ),
-        TestInfo::new(
-            "nextest-tests::bin/nextest-tests",
-            BuildPlatform::Target,
-            vec![("tests::bin_success", false)],
-        ),
-        TestInfo::new(
-            "nextest-tests",
-            BuildPlatform::Target,
-            vec![
-                ("tests::call_dylib_add_two", false),
-                ("tests::unit_test_success", false),
-            ],
-        ),
-        TestInfo::new(
-            "nextest-tests::other",
-            BuildPlatform::Target,
-            vec![("other_test_success", false)],
-        ),
-        TestInfo::new(
-            "nextest-tests::segfault",
-            BuildPlatform::Target,
-            vec![("test_segfault", false)],
-        ),
-        TestInfo::new(
-            "nextest-tests::bin/other",
-            BuildPlatform::Target,
-            vec![("tests::other_bin_success", false)],
-        ),
-        TestInfo::new(
-            "nextest-tests::example/nextest-tests",
-            BuildPlatform::Target,
-            vec![("tests::example_success", false)],
-        ),
-        TestInfo::new(
-            "nextest-tests::example/other",
-            BuildPlatform::Target,
-            vec![("tests::other_example_success", false)],
-        ),
-        TestInfo::new(
-            "with-build-script",
-            BuildPlatform::Target,
-            vec![("tests::test_out_dir_present", false)],
-        ),
-        TestInfo::new("proc-macro-test", BuildPlatform::Host, vec![]),
-    ]
-});
-
-pub fn cargo_bin() -> String {
-    match std::env::var("CARGO") {
-        Ok(v) => v,
-        Err(std::env::VarError::NotPresent) => "cargo".to_owned(),
-        Err(err) => panic!("error obtaining CARGO env var: {err}"),
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct CargoNextestCli {
-    bin: Utf8PathBuf,
-    args: Vec<String>,
-    envs: HashMap<OsString, OsString>,
-    unchecked: bool,
-}
-
-impl CargoNextestCli {
-    pub fn new() -> Self {
-        let bin = std::env::var("NEXTEST_BIN_EXE_cargo-nextest-dup")
-            .expect("unable to find cargo-nextest-dup");
-        Self {
-            bin: bin.into(),
-            args: Vec::new(),
-            envs: HashMap::new(),
-            unchecked: false,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn arg(&mut self, arg: impl Into<String>) -> &mut Self {
-        self.args.push(arg.into());
-        self
-    }
-
-    pub fn args(&mut self, arg: impl IntoIterator<Item = impl Into<String>>) -> &mut Self {
-        self.args.extend(arg.into_iter().map(Into::into));
-        self
-    }
-
-    pub fn env(&mut self, k: impl Into<OsString>, v: impl Into<OsString>) -> &mut Self {
-        self.envs.insert(k.into(), v.into());
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn envs(
-        &mut self,
-        envs: impl IntoIterator<Item = (impl Into<OsString>, impl Into<OsString>)>,
-    ) -> &mut Self {
-        self.envs
-            .extend(envs.into_iter().map(|(k, v)| (k.into(), v.into())));
-        self
-    }
-
-    pub fn unchecked(&mut self, unchecked: bool) -> &mut Self {
-        self.unchecked = unchecked;
-        self
-    }
-
-    pub fn output(&self) -> CargoNextestOutput {
-        let mut command = std::process::Command::new(&self.bin);
-        command.arg("nextest").args(&self.args);
-        command.envs(&self.envs);
-        let output = command.output().expect("failed to execute");
-
-        let ret = CargoNextestOutput {
-            command,
-            exit_status: output.status,
-            stdout: output.stdout,
-            stderr: output.stderr,
-        };
-
-        if !self.unchecked && !output.status.success() {
-            panic!("command failed:\n\n{ret}");
-        }
-
-        ret
-    }
-}
-
-pub struct CargoNextestOutput {
-    pub command: Command,
-    pub exit_status: ExitStatus,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-}
-
-impl CargoNextestOutput {
-    pub fn stdout_as_str(&self) -> Cow<'_, str> {
-        String::from_utf8_lossy(&self.stdout)
-    }
-
-    pub fn stderr_as_str(&self) -> Cow<'_, str> {
-        String::from_utf8_lossy(&self.stderr)
-    }
-
-    pub fn decode_test_list_json(&self) -> Result<TestListSummary> {
-        Ok(serde_json::from_slice(&self.stdout)?)
-    }
-}
-
-impl fmt::Display for CargoNextestOutput {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "command: {:?}\nexit code: {:?}\n\
-                   --- stdout ---\n{}\n\n--- stderr ---\n{}\n\n",
-            self.command,
-            self.exit_status.code(),
-            String::from_utf8_lossy(&self.stdout),
-            String::from_utf8_lossy(&self.stderr)
-        )
-    }
-}
-
-// Make Debug output the same as Display output, so `.unwrap()` and `.expect()` are nicer.
-impl fmt::Debug for CargoNextestOutput {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
-}
-
-#[track_caller]
-pub(super) fn set_env_vars() {
-    // The dynamic library tests require this flag.
-    std::env::set_var("RUSTFLAGS", "-C prefer-dynamic");
-    // Set CARGO_TERM_COLOR to never to ensure that ANSI color codes don't interfere with the
-    // output.
-    // TODO: remove this once programmatic run statuses are supported.
-    std::env::set_var("CARGO_TERM_COLOR", "never");
-    // This environment variable is required to test the #[bench] fixture. Note that THIS IS FOR
-    // TEST CODE ONLY. NEVER USE THIS IN PRODUCTION.
-    std::env::set_var("RUSTC_BOOTSTRAP", "1");
-
-    // Disable the tests which check for environment variables being set in `config.toml`, as they
-    // won't be in the search path when running integration tests.
-    std::env::set_var("__NEXTEST_NO_CHECK_CARGO_ENV_VARS", "1");
-
-    // Remove OUT_DIR from the environment, as it interferes with tests (some of them expect that
-    // OUT_DIR isn't set.)
-    std::env::remove_var("OUT_DIR");
-}
+use std::process::Command;
 
 #[track_caller]
 pub fn save_cargo_metadata(p: &TempProject) {
@@ -293,8 +31,8 @@ pub fn save_cargo_metadata(p: &TempProject) {
 }
 
 #[track_caller]
-pub fn build_tests(p: &TempProject) {
-    let output = CargoNextestCli::new()
+pub fn save_binaries_metadata(p: &TempProject) {
+    let output = CargoNextestCli::for_test()
         .args([
             "--manifest-path",
             p.manifest_path().as_str(),
@@ -316,23 +54,23 @@ pub fn build_tests(p: &TempProject) {
 pub fn check_list_full_output(stdout: &[u8], platform: Option<BuildPlatform>) {
     let result: TestListSummary = serde_json::from_slice(stdout).unwrap();
 
-    let test_suite = &*EXPECTED_LIST;
+    let test_suites = &*EXPECTED_TEST_SUITES;
     assert_eq!(
-        test_suite.len(),
+        test_suites.len(),
         result.rust_suites.len(),
         "test suite counts match"
     );
 
-    for test in test_suite {
+    for test_suite in test_suites.values() {
         match platform {
-            Some(p) if test.platform != p => continue,
+            Some(p) if test_suite.build_platform != p => continue,
             _ => {}
         }
 
-        let entry = result.rust_suites.get(&test.id);
+        let entry = result.rust_suites.get(&test_suite.binary_id);
         let entry = match entry {
             Some(e) => e,
-            _ => panic!("Missing binary: {}", test.id),
+            _ => panic!("Missing binary: {}", test_suite.binary_id),
         };
 
         if let Some(platform) = platform {
@@ -342,7 +80,7 @@ pub fn check_list_full_output(stdout: &[u8], platform: Option<BuildPlatform>) {
                     entry.status,
                     RustTestSuiteStatusSummary::SKIPPED,
                     "for {}, test suite expected to be skipped because of platform mismatch",
-                    test.id
+                    test_suite.binary_id
                 );
                 assert!(
                     entry.test_cases.is_empty(),
@@ -356,21 +94,24 @@ pub fn check_list_full_output(stdout: &[u8], platform: Option<BuildPlatform>) {
             entry.status,
             RustTestSuiteStatusSummary::LISTED,
             "for {}, test suite expected to be listed",
-            test.id
+            test_suite.binary_id
         );
         assert_eq!(
-            test.test_cases.len(),
+            test_suite.test_cases.len(),
             entry.test_cases.len(),
             "testcase lengths match for {}",
-            test.id
+            test_suite.binary_id
         );
-        for case in &test.test_cases {
-            let e = entry.test_cases.get(case.0);
+        for case in &test_suite.test_cases {
+            let e = entry.test_cases.get(case.name);
             let e = match e {
                 Some(e) => e,
-                _ => panic!("Missing test case '{}' in '{}'", case.0, test.id),
+                _ => panic!(
+                    "Missing test case '{}' in '{}'",
+                    case.name, test_suite.binary_id
+                ),
             };
-            assert_eq!(case.1, e.ignored);
+            assert_eq!(case.status.is_ignored(), e.ignored);
         }
     }
 }
@@ -379,47 +120,99 @@ pub fn check_list_full_output(stdout: &[u8], platform: Option<BuildPlatform>) {
 pub fn check_list_binaries_output(stdout: &[u8]) {
     let result: BinaryListSummary = serde_json::from_slice(stdout).unwrap();
 
-    let test_suite = &*EXPECTED_LIST;
+    let test_suite = &*EXPECTED_TEST_SUITES;
     let mut expected_binary_ids = test_suite
         .iter()
-        .map(|test_info| test_info.id.clone())
+        .map(|(binary_id, fixture)| (binary_id.clone(), fixture.build_platform))
         .collect::<Vec<_>>();
-    expected_binary_ids.sort();
-    let mut actual_binary_ids = result.rust_binaries.keys().collect::<Vec<_>>();
-    actual_binary_ids.sort();
+    expected_binary_ids.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let mut actual_binary_ids = result
+        .rust_binaries
+        .iter()
+        .map(|(binary_id, info)| (binary_id.clone(), info.build_platform))
+        .collect::<Vec<_>>();
+    actual_binary_ids.sort_by(|(a, _), (b, _)| a.cmp(b));
+
     assert_eq!(
-        test_suite.len(),
-        result.rust_binaries.len(),
-        "expected rust binaries:\n{:?}\nactual rust binaries\n{:?}",
-        expected_binary_ids,
-        actual_binary_ids
+        expected_binary_ids, actual_binary_ids,
+        "expected binaries:\n{expected_binary_ids:?}\nactual binaries\n{actual_binary_ids:?}"
     );
+}
 
-    for test in test_suite {
-        let entry = result
-            .rust_binaries
-            .iter()
-            .find(|(_, bin)| bin.binary_id == test.id);
-        let entry = match entry {
-            Some(e) => e,
-            _ => panic!("Missing binary: {}", test.id),
-        };
+#[derive(Clone, Copy, Debug)]
+enum CheckResult {
+    Pass,
+    Leak,
+    Fail,
+    FailLeak,
+    Abort,
+}
 
-        assert_eq!(test.platform, entry.1.build_platform);
+impl CheckResult {
+    fn make_status_line_regex(self, name: &str) -> Regex {
+        let name = regex::escape(name);
+        match self {
+            CheckResult::Pass => Regex::new(&format!(r"PASS \[.*\] *{name}")).unwrap(),
+            CheckResult::Leak => Regex::new(&format!(r"LEAK \[.*\] *{name}")).unwrap(),
+            CheckResult::Fail => Regex::new(&format!(r"FAIL \[.*\] *{name}")).unwrap(),
+            CheckResult::FailLeak => Regex::new(&format!(r"FAIL \+ LEAK \[.*\] *{name}")).unwrap(),
+            CheckResult::Abort => {
+                Regex::new(&format!(r"(ABORT|SIGSEGV|SIGABRT) \[.*\] *{name}")).unwrap()
+            }
+        }
+    }
+
+    fn make_output_regexes(self, name: &str) -> Vec<(&'static str, Regex)> {
+        // By default, output is only displayed for fail, fail + leak, and abort
+        // tests.
+        match self {
+            CheckResult::Fail | CheckResult::FailLeak | CheckResult::Abort => {
+                vec![
+                    (
+                        "stdout",
+                        Regex::new(&format!("──── STDOUT: +{name}")).unwrap(),
+                    ),
+                    (
+                        "stderr",
+                        Regex::new(&format!("──── STDERR: +{name}")).unwrap(),
+                    ),
+                ]
+            }
+            CheckResult::Pass | CheckResult::Leak => vec![],
+        }
     }
 }
 
-fn make_check_result_regex(result: bool, name: &str) -> Regex {
-    let name = regex::escape(name);
-    if result {
-        Regex::new(&format!(r"PASS \[.*\] *{name}")).unwrap()
-    } else {
-        Regex::new(&format!(r"(FAIL|ABORT|SIGSEGV) \[.*\] *{name}")).unwrap()
+#[derive(Clone, Copy, Debug)]
+#[repr(u64)]
+pub enum RunProperty {
+    Relocated = 1,
+    WithDefaultFilter = 2,
+    // --skip cdylib
+    WithSkipCdylibFilter = 4,
+    // --exact test_multiply_two tests::test_multiply_two_cdylib
+    WithMultiplyTwoExactFilter = 8,
+}
+
+fn debug_run_properties(properties: u64) -> String {
+    let mut ret = String::new();
+    if properties & RunProperty::Relocated as u64 != 0 {
+        ret.push_str("relocated ");
     }
+    if properties & RunProperty::WithDefaultFilter as u64 != 0 {
+        ret.push_str("with-default-filter ");
+    }
+    if properties & RunProperty::WithSkipCdylibFilter as u64 != 0 {
+        ret.push_str("with-skip-cdylib-filter ");
+    }
+    if properties & RunProperty::WithMultiplyTwoExactFilter as u64 != 0 {
+        ret.push_str("with-exact-filter ");
+    }
+    ret
 }
 
 #[track_caller]
-pub fn check_run_output(stderr: &[u8], relocated: bool) {
+pub fn check_run_output(stderr: &[u8], properties: u64) {
     // This could be made more robust with a machine-readable output,
     // or maybe using quick-junit output
 
@@ -427,63 +220,172 @@ pub fn check_run_output(stderr: &[u8], relocated: bool) {
 
     println!("{output}");
 
-    let cwd_pass = !relocated;
+    let mut run_count = 0;
+    let mut leak_count = 0;
+    let mut pass_count = 0;
+    let mut fail_count = 0;
+    let mut skip_count = 0;
 
-    let expected = &[
-        (true, "cdylib-link test_multiply_two"),
-        (true, "cdylib-example tests::test_multiply_two_cdylib"),
-        (true, "nextest-tests::basic test_cargo_env_vars"),
-        (true, "nextest-tests::basic test_execute_bin"),
-        (true, "nextest-tests::bench/my-bench bench_add_two"),
-        (
-            true,
-            "nextest-tests::bench/my-bench tests::test_execute_bin",
-        ),
-        (false, "nextest-tests::basic test_failure_error"),
-        (false, "nextest-tests::basic test_flaky_mod_4"),
-        (true, "nextest-tests::bin/nextest-tests tests::bin_success"),
-        (false, "nextest-tests::basic test_failure_should_panic"),
-        (true, "nextest-tests::bin/nextest-tests tests::bin_success"),
-        (false, "nextest-tests::basic test_failure_should_panic"),
-        (true, "nextest-tests::bin/other tests::other_bin_success"),
-        (false, "nextest-tests::basic test_result_failure"),
-        (true, "nextest-tests::basic test_success_should_panic"),
-        (false, "nextest-tests::basic test_failure_assert"),
-        (true, "nextest-tests::basic test_stdin_closed"),
-        (false, "nextest-tests::basic test_flaky_mod_6"),
-        (cwd_pass, "nextest-tests::basic test_cwd"),
-        (
-            true,
-            "nextest-tests::example/nextest-tests tests::example_success",
-        ),
-        (true, "nextest-tests::other other_test_success"),
-        (true, "nextest-tests::basic test_success"),
-        (false, "nextest-tests::segfault test_segfault"),
-        (true, "nextest-derive it_works"),
-        (
-            true,
-            "nextest-tests::example/other tests::other_example_success",
-        ),
-        (true, "nextest-tests tests::unit_test_success"),
-    ];
+    for (binary_id, fixture) in &*EXPECTED_TEST_SUITES {
+        if fixture.has_property(TestSuiteFixtureProperty::NotInDefaultSet)
+            && properties & RunProperty::WithDefaultFilter as u64 != 0
+        {
+            eprintln!("*** skipping {binary_id}");
+            for test in &fixture.test_cases {
+                let name = format!("{} {}", binary_id, test.name);
+                // This binary should be skipped -- ensure that it isn't in the output. If it sh
+                assert!(
+                    !output.contains(&name),
+                    "binary {binary_id} should not be run with default set"
+                );
+            }
+            continue;
+        }
 
-    for (result, name) in expected {
-        let reg = make_check_result_regex(*result, name);
-        assert!(
-            reg.is_match(&output),
-            "{name}: result didn't match\n\n--- output ---\n{output}\n--- end output ---"
-        );
+        for test in &fixture.test_cases {
+            let name = format!("{} {}", binary_id, test.name);
+
+            if test.has_property(TestCaseFixtureProperty::NotInDefaultSet)
+                && properties & RunProperty::WithDefaultFilter as u64 != 0
+            {
+                eprintln!("*** skipping {name}");
+                assert!(
+                    !output.contains(&name),
+                    "test '{name}' should not be run with default set"
+                );
+                skip_count += 1;
+                continue;
+            }
+            if cfg!(unix)
+                && test.has_property(TestCaseFixtureProperty::NotInDefaultSetUnix)
+                && properties & RunProperty::WithDefaultFilter as u64 != 0
+            {
+                eprintln!("*** skipping {name}");
+                assert!(
+                    !output.contains(&name),
+                    "test '{name}' should not be run with default set on Unix"
+                );
+                skip_count += 1;
+                continue;
+            }
+            if test.has_property(TestCaseFixtureProperty::MatchesCdylib)
+                && properties & RunProperty::WithSkipCdylibFilter as u64 != 0
+            {
+                eprintln!("*** skipping {name}");
+                assert!(
+                    !output.contains(&name),
+                    "test '{name}' should not be run with --skip cdylib"
+                );
+                skip_count += 1;
+                continue;
+            }
+            if !test.has_property(TestCaseFixtureProperty::MatchesTestMultiplyTwo)
+                && properties & RunProperty::WithMultiplyTwoExactFilter as u64 != 0
+            {
+                eprintln!("*** skipping {name}");
+                assert!(
+                    !output.contains(&name),
+                    "test '{name}' should not be run with --exact test_multiply_two test_multiply_two_cdylib"
+                );
+                skip_count += 1;
+                continue;
+            }
+
+            let result = match test.status {
+                // This is not a complete accounting -- for example, the needs-same-cwd check should
+                // also be repeated for leaky tests in principle. But it's good enough for the test
+                // suite that actually exists.
+                TestCaseFixtureStatus::Pass => {
+                    run_count += 1;
+                    if test.has_property(TestCaseFixtureProperty::NeedsSameCwd)
+                        && properties & RunProperty::Relocated as u64 != 0
+                    {
+                        fail_count += 1;
+                        CheckResult::Fail
+                    } else {
+                        pass_count += 1;
+                        CheckResult::Pass
+                    }
+                }
+                TestCaseFixtureStatus::Leak => {
+                    run_count += 1;
+                    pass_count += 1;
+                    leak_count += 1;
+                    CheckResult::Leak
+                }
+                TestCaseFixtureStatus::Fail | TestCaseFixtureStatus::Flaky { .. } => {
+                    // Flaky tests are not currently retried by this test suite. (They are retried
+                    // by the older suite in nextest-runner/tests/integration).
+                    run_count += 1;
+                    fail_count += 1;
+                    CheckResult::Fail
+                }
+                TestCaseFixtureStatus::FailLeak => {
+                    run_count += 1;
+                    fail_count += 1;
+                    // Currently, fail + leak tests are not added to the
+                    // leak_count, just the fail_count. (Maybe this is worth
+                    // changing in the UI?)
+                    CheckResult::FailLeak
+                }
+                TestCaseFixtureStatus::Segfault => {
+                    run_count += 1;
+                    fail_count += 1;
+                    CheckResult::Abort
+                }
+                TestCaseFixtureStatus::IgnoredPass | TestCaseFixtureStatus::IgnoredFail => {
+                    // Ignored tests are not currently run by this test suite. (They are run by the
+                    // older suite in nextest-runner/tests/integration).
+                    skip_count += 1;
+                    continue;
+                }
+            };
+            let name = format!("{} {}", binary_id, test.name);
+            let reg = result.make_status_line_regex(&name);
+            assert!(
+                reg.is_match(&output),
+                "{name}: status line result didn't match\n\n\
+                 --- output ---\n{output}\n--- end output ---"
+            );
+
+            for (reg_name, reg) in result.make_output_regexes(&name) {
+                assert!(
+                    reg.is_match(&output),
+                    "{name}: output regex for {reg_name} didn't match\n\n\
+                     --- output ---\n{output}\n--- end output ---"
+                )
+            }
+        }
     }
 
-    let summary_reg = if relocated {
-        Regex::new(r"Summary \[.*\] *27 tests run: 19 passed \(1 leaky\), 8 failed, 5 skipped")
-            .unwrap()
-    } else {
-        Regex::new(r"Summary \[.*\] *27 tests run: 20 passed \(1 leaky\), 7 failed, 5 skipped")
-            .unwrap()
+    let tests_str = if run_count == 1 { "test" } else { "tests" };
+
+    let summary_regex_str = match (leak_count, fail_count) {
+        (0, 0) => {
+            format!(
+                r"Summary \[.*\] *{run_count} {tests_str} run: {pass_count} passed, {skip_count} skipped"
+            )
+        }
+        (0, _) => {
+            format!(
+                r"Summary \[.*\] *{run_count} {tests_str} run: {pass_count} passed, {fail_count} failed, {skip_count} skipped"
+            )
+        }
+        (_, 0) => {
+            format!(
+                r"Summary \[.*\] *{run_count} {tests_str} run: {pass_count} passed \({leak_count} leaky\), {skip_count} skipped"
+            )
+        }
+        (_, _) => {
+            format!(
+                r"Summary \[.*\] *{run_count} {tests_str} run: {pass_count} passed \({leak_count} leaky\), {fail_count} failed, {skip_count} skipped"
+            )
+        }
     };
+    let summary_reg = Regex::new(&summary_regex_str).unwrap();
     assert!(
         summary_reg.is_match(&output),
-        "summary didn't match (actual output: {output}, relocated: {relocated})"
+        "summary didn't match regex {summary_regex_str} (actual output: {output}, properties: {})",
+        debug_run_properties(properties),
     );
 }

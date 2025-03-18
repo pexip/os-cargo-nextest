@@ -22,12 +22,21 @@ filter = "test(=test_cargo_env_vars)"
 setup = "my-script-windows"
 
 [[profile.default.overrides]]
-# See https://github.com/nextest-rs/nextest/issues/984.
-platform = { host = 'cfg(windows)' }
+# For Windows: See https://github.com/nextest-rs/nextest/issues/984.
+#
+# For illumos: Under stress, some tests can incorrectly say they're leaky. For example:
+# https://buildomat.eng.oxide.computer/wg/0/details/01J5HQ7T1J3WRZ4KSSE92YS1RZ/40lQc6hVXJWGG966LAWGP2Ckgw0pIJnd9lfzC4K8OQOpwRO5/01J5HQ814KXZADXRAMX89GC8J1#S1469.
+
+platform = { host = 'cfg(any(windows, target_os = "illumos"))' }
 leak-timeout = '1s'
 
 [profile.with-retries]
 retries = 2
+
+# Test out serial tests.
+[[profile.with-retries.overrides]]
+filter = "test(=test_success) | test(=test_execute_bin)"
+test-group = 'serial'
 
 # Run test_flaky_mod_6 with 5 retries (6 tries) rather than 2.
 [[profile.with-retries.overrides]]
@@ -70,11 +79,39 @@ path = "junit.xml"
 [profile.retries-with-backoff]
 retries = { backoff = "exponential", count = 2, jitter = true, delay = "1s" }
 
+[profile.with-default-filter]
+default-filter = "not (test(test_flaky) | package(cdylib-example))"
+
+# Platform-specific default filters.
+[[profile.with-default-filter.overrides]]
+platform = 'cfg(unix)'
+default-filter = "not (test(test_flaky) | package(cdylib-example) | test(test_cargo_env_vars))"
+
+[profile.archive-all]
+archive.include = [{ path = "", relative-to = "target" }]
+
+# Test priority support.
+[profile.with-priorities]
+default-filter = "test(=test_success) | test(=test_cargo_env_vars) | test(=test_flaky_mod_4)"
+
+[[profile.with-priorities.overrides]]
+# test_cargo_env_vars is alphabetically before test_success, but priority forces
+# it to be run last.
+filter = "test(=test_cargo_env_vars)"
+priority = -50
+
+[[profile.with-priorities.overrides]]
+filter = "test(=test_success)"
+priority = 50
+
 [test-groups.flaky]
 max-threads = 4
 
 [test-groups.unused]
 max-threads = 20
+
+[test-groups.serial]
+max-threads = 1
 
 [script.my-script-unix]
 command = './scripts/my-script.sh'

@@ -1,11 +1,12 @@
 // Copyright (c) The nextest Contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use crate::errors::{CargoConfigError, InvalidCargoCliConfigReason};
+use crate::errors::{CargoConfigError, CargoConfigParseError, InvalidCargoCliConfigReason};
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use toml_edit::Item;
+use tracing::debug;
 
 /// The source of a Cargo config.
 ///
@@ -71,7 +72,7 @@ impl CargoConfigs {
             match Utf8PathBuf::try_from(path) {
                 Ok(path) => target_paths.push(path),
                 Err(error) => {
-                    log::debug!("for RUST_TARGET_PATH, {error}");
+                    debug!("for RUST_TARGET_PATH, {error}");
                 }
             }
         }
@@ -200,7 +201,7 @@ fn parse_cli_config(config_str: &str) -> Result<CargoConfig, CargoConfigError> {
             })?;
 
     fn non_empty(d: Option<&toml_edit::RawString>) -> bool {
-        d.map_or(false, |p| !p.as_str().unwrap_or_default().trim().is_empty())
+        d.is_some_and(|p| !p.as_str().unwrap_or_default().trim().is_empty())
     }
     fn non_empty_decor(d: &toml_edit::Decor) -> bool {
         non_empty(d.prefix()) || non_empty(d.suffix())
@@ -221,8 +222,7 @@ fn parse_cli_config(config_str: &str) -> Result<CargoConfig, CargoConfigError> {
             let (k, n) = table.iter().next().expect("len() == 1 above");
             match n {
                 Item::Table(nt) => {
-                    if table.key(k).map_or(false, non_empty_key_decor)
-                        || non_empty_decor(nt.decor())
+                    if table.key(k).is_some_and(non_empty_key_decor) || non_empty_decor(nt.decor())
                     {
                         return Err(CargoConfigError::InvalidCliConfig {
                             config_str: config_str.to_owned(),
@@ -240,7 +240,7 @@ fn parse_cli_config(config_str: &str) -> Result<CargoConfig, CargoConfigError> {
                 Item::Value(v) => {
                     if table
                         .key(k)
-                        .map_or(false, |k| non_empty(k.leaf_decor().prefix()))
+                        .is_some_and(|k| non_empty(k.leaf_decor().prefix()))
                         || non_empty_decor(v.decor())
                     {
                         return Err(CargoConfigError::InvalidCliConfig {
@@ -375,11 +375,12 @@ fn load_file(
             path: path.clone(),
             error,
         })?;
-    let config: CargoConfig =
-        toml::from_str(&config_contents).map_err(|error| CargoConfigError::ConfigParseError {
+    let config: CargoConfig = toml::from_str(&config_contents).map_err(|error| {
+        CargoConfigError::from(Box::new(CargoConfigParseError {
             path: path.clone(),
             error,
-        })?;
+        }))
+    })?;
     Ok((CargoConfigSource::File(path), config))
 }
 

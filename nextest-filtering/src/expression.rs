@@ -2,20 +2,21 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::{
-    errors::{FilterExpressionParseErrors, ParseSingleError},
+    errors::{FiltersetParseErrors, ParseSingleError},
     parsing::{
-        new_span, parse, DisplayParsedRegex, DisplayParsedString, ExprResult, GenericGlob,
-        ParsedExpr, SetDef,
+        DisplayParsedRegex, DisplayParsedString, ExprResult, GenericGlob, ParsedExpr, SetDef,
+        new_span, parse,
     },
 };
 use guppy::{
-    graph::{cargo::BuildPlatform, PackageGraph},
     PackageId,
+    graph::{BuildTargetId, PackageGraph, PackageMetadata, cargo::BuildPlatform},
 };
 use miette::SourceSpan;
 use nextest_metadata::{RustBinaryId, RustTestBinaryKind};
 use recursion::{Collapsible, CollapsibleExt, MappableFrame, PartiallyApplied};
-use std::{collections::HashSet, fmt};
+use smol_str::SmolStr;
+use std::{collections::HashSet, fmt, sync::OnceLock};
 
 /// Matcher for name
 ///
@@ -108,9 +109,9 @@ impl fmt::Display for NameMatcher {
     }
 }
 
-/// Define a set of tests
+/// A leaf node in a filterset expression tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FilteringSet {
+pub enum FiltersetLeaf {
     /// All tests in packages
     Packages(HashSet<PackageId>),
     /// All tests present in this kind of binary.
@@ -123,13 +124,15 @@ pub enum FilteringSet {
     BinaryId(NameMatcher, SourceSpan),
     /// All tests matching a name
     Test(NameMatcher, SourceSpan),
+    /// The default set of tests to run.
+    Default,
     /// All tests
     All,
     /// No tests
     None,
 }
 
-/// A query for a binary, passed into [`FilteringExpr::matches_binary`].
+/// A query for a binary, passed into [`Filterset::matches_binary`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct BinaryQuery<'a> {
     /// The package ID.
@@ -148,7 +151,7 @@ pub struct BinaryQuery<'a> {
     pub platform: BuildPlatform,
 }
 
-/// A query for a specific test, passed into [`FilteringExpr::matches_test`].
+/// A query for a specific test, passed into [`Filterset::matches_test`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct TestQuery<'a> {
     /// The binary query.
@@ -158,11 +161,11 @@ pub struct TestQuery<'a> {
     pub test_name: &'a str,
 }
 
-/// Filtering expression.
+/// A filterset that has been parsed and compiled.
 ///
 /// Used to filter tests to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FilteringExpr {
+pub struct Filterset {
     /// The raw expression passed in.
     pub input: String,
 
@@ -182,7 +185,46 @@ pub enum CompiledExpr {
     /// Accepts every test in both given expressions
     Intersection(Box<CompiledExpr>, Box<CompiledExpr>),
     /// Accepts every test in a set
-    Set(FilteringSet),
+    Set(FiltersetLeaf),
+}
+
+impl CompiledExpr {
+    /// Returns a value indicating all tests are accepted by this filterset.
+    pub const ALL: Self = CompiledExpr::Set(FiltersetLeaf::All);
+
+    /// Returns a value indicating if the given binary is accepted by this filterset.
+    ///
+    /// The value is:
+    /// * `Some(true)` if this binary is definitely accepted by this filterset.
+    /// * `Some(false)` if this binary is definitely not accepted.
+    /// * `None` if this binary might or might not be accepted.
+    pub fn matches_binary(&self, query: &BinaryQuery<'_>, cx: &EvalContext<'_>) -> Option<bool> {
+        use ExprFrame::*;
+        Wrapped(self).collapse_frames(|layer: ExprFrame<&FiltersetLeaf, Option<bool>>| {
+            match layer {
+                Set(set) => set.matches_binary(query, cx),
+                Not(a) => a.logic_not(),
+                // TODO: or_else/and_then?
+                Union(a, b) => a.logic_or(b),
+                Intersection(a, b) => a.logic_and(b),
+                Difference(a, b) => a.logic_and(b.logic_not()),
+                Parens(a) => a,
+            }
+        })
+    }
+
+    /// Returns true if the given test is accepted by this filterset.
+    pub fn matches_test(&self, query: &TestQuery<'_>, cx: &EvalContext<'_>) -> bool {
+        use ExprFrame::*;
+        Wrapped(self).collapse_frames(|layer: ExprFrame<&FiltersetLeaf, bool>| match layer {
+            Set(set) => set.matches_test(query, cx),
+            Not(a) => !a,
+            Union(a, b) => a || b,
+            Intersection(a, b) => a && b,
+            Difference(a, b) => a && !b,
+            Parens(a) => a,
+        })
+    }
 }
 
 impl NameMatcher {
@@ -196,11 +238,12 @@ impl NameMatcher {
     }
 }
 
-impl FilteringSet {
-    fn matches_test(&self, query: &TestQuery<'_>) -> bool {
+impl FiltersetLeaf {
+    fn matches_test(&self, query: &TestQuery<'_>, cx: &EvalContext) -> bool {
         match self {
             Self::All => true,
             Self::None => false,
+            Self::Default => cx.default_filter.matches_test(query, cx),
             Self::Test(matcher, _) => matcher.is_match(query.test_name),
             Self::Binary(matcher, _) => matcher.is_match(query.binary_query.binary_name),
             Self::BinaryId(matcher, _) => matcher.is_match(query.binary_query.binary_id.as_str()),
@@ -210,10 +253,11 @@ impl FilteringSet {
         }
     }
 
-    fn matches_binary(&self, query: &BinaryQuery<'_>) -> Option<bool> {
+    fn matches_binary(&self, query: &BinaryQuery<'_>, cx: &EvalContext) -> Option<bool> {
         match self {
             Self::All => Logic::top(),
             Self::None => Logic::bottom(),
+            Self::Default => cx.default_filter.matches_binary(query, cx),
             Self::Test(_, _) => None,
             Self::Binary(matcher, _) => Some(matcher.is_match(query.binary_name)),
             Self::BinaryId(matcher, _) => Some(matcher.is_match(query.binary_id.as_str())),
@@ -224,22 +268,137 @@ impl FilteringSet {
     }
 }
 
-impl FilteringExpr {
-    /// Parse a filtering expression
-    pub fn parse(input: String, graph: &PackageGraph) -> Result<Self, FilterExpressionParseErrors> {
+/// Inputs to filterset parsing.
+#[derive(Debug)]
+pub struct ParseContext<'g> {
+    /// The package graph.
+    graph: &'g PackageGraph,
+
+    /// Cached data computed on first access.
+    cache: OnceLock<ParseContextCache<'g>>,
+}
+
+impl<'g> ParseContext<'g> {
+    /// Creates a new `ParseContext`.
+    #[inline]
+    pub fn new(graph: &'g PackageGraph) -> Self {
+        Self {
+            graph,
+            cache: OnceLock::new(),
+        }
+    }
+
+    /// Returns the package graph.
+    #[inline]
+    pub fn graph(&self) -> &'g PackageGraph {
+        self.graph
+    }
+
+    pub(crate) fn make_cache(&self) -> &ParseContextCache<'g> {
+        self.cache
+            .get_or_init(|| ParseContextCache::new(self.graph))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ParseContextCache<'g> {
+    pub(crate) workspace_packages: Vec<PackageMetadata<'g>>,
+    // Ordinarily we'd store RustBinaryId here, but that wouldn't allow looking
+    // up a string.
+    pub(crate) binary_ids: HashSet<SmolStr>,
+    pub(crate) binary_names: HashSet<&'g str>,
+}
+
+impl<'g> ParseContextCache<'g> {
+    fn new(graph: &'g PackageGraph) -> Self {
+        let workspace_packages: Vec<_> = graph
+            .resolve_workspace()
+            .packages(guppy::graph::DependencyDirection::Forward)
+            .collect();
+        let (binary_ids, binary_names) = workspace_packages
+            .iter()
+            .flat_map(|pkg| {
+                pkg.build_targets().filter_map(|bt| {
+                    let kind = compute_kind(&bt.id())?;
+                    let binary_id = RustBinaryId::from_parts(pkg.name(), &kind, bt.name());
+                    Some((SmolStr::new(binary_id.as_str()), bt.name()))
+                })
+            })
+            .unzip();
+
+        Self {
+            workspace_packages,
+            binary_ids,
+            binary_names,
+        }
+    }
+}
+
+fn compute_kind(id: &BuildTargetId<'_>) -> Option<RustTestBinaryKind> {
+    match id {
+        // Note this covers both libraries and proc macros, but we treat
+        // libraries the same as proc macros while constructing a `RustBinaryId`
+        // anyway.
+        BuildTargetId::Library => Some(RustTestBinaryKind::LIB),
+        BuildTargetId::Benchmark(_) => Some(RustTestBinaryKind::BENCH),
+        BuildTargetId::Example(_) => Some(RustTestBinaryKind::EXAMPLE),
+        BuildTargetId::BuildScript => {
+            // Build scripts don't have tests in them.
+            None
+        }
+        BuildTargetId::Binary(_) => Some(RustTestBinaryKind::BIN),
+        BuildTargetId::Test(_) => Some(RustTestBinaryKind::TEST),
+        _ => panic!("unknown build target id: {id:?}"),
+    }
+}
+
+/// The kind of filterset being parsed.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FiltersetKind {
+    /// A test filterset.
+    Test,
+
+    /// A default-filter filterset.
+    ///
+    /// To prevent recursion, default-filter expressions cannot contain `default()` themselves.
+    /// (This is a limited kind of the infinite recursion checking we'll need to do in the future.)
+    DefaultFilter,
+}
+
+impl fmt::Display for FiltersetKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Test => write!(f, "test"),
+            Self::DefaultFilter => write!(f, "default-filter"),
+        }
+    }
+}
+
+/// Inputs to filterset evaluation functions.
+#[derive(Copy, Clone, Debug)]
+pub struct EvalContext<'a> {
+    /// The default set of tests to run.
+    pub default_filter: &'a CompiledExpr,
+}
+
+impl Filterset {
+    /// Parse a filterset.
+    pub fn parse(
+        input: String,
+        cx: &ParseContext<'_>,
+        kind: FiltersetKind,
+    ) -> Result<Self, FiltersetParseErrors> {
         let mut errors = Vec::new();
         match parse(new_span(&input, &mut errors)) {
             Ok(parsed_expr) => {
                 if !errors.is_empty() {
-                    return Err(FilterExpressionParseErrors::new(input.clone(), errors));
+                    return Err(FiltersetParseErrors::new(input.clone(), errors));
                 }
 
                 match parsed_expr {
                     ExprResult::Valid(parsed) => {
-                        let compiled =
-                            crate::compile::compile(&parsed, graph).map_err(|errors| {
-                                FilterExpressionParseErrors::new(input.clone(), errors)
-                            })?;
+                        let compiled = crate::compile::compile(&parsed, cx, kind)
+                            .map_err(|errors| FiltersetParseErrors::new(input.clone(), errors))?;
                         Ok(Self {
                             input,
                             parsed,
@@ -251,7 +410,7 @@ impl FilteringExpr {
                         // If an ParsedExpr::Error is produced, we should also have an error inside
                         // errors and we should already have returned
                         // IMPROVE this is an internal error => add log to suggest opening an bug ?
-                        Err(FilterExpressionParseErrors::new(
+                        Err(FiltersetParseErrors::new(
                             input,
                             vec![ParseSingleError::Unknown],
                         ))
@@ -262,7 +421,7 @@ impl FilteringExpr {
                 // should not happen
                 // According to our parsing strategy we should never produce an Err(_)
                 // IMPROVE this is an internal error => add log to suggest opening an bug ?
-                Err(FilterExpressionParseErrors::new(
+                Err(FiltersetParseErrors::new(
                     input,
                     vec![ParseSingleError::Unknown],
                 ))
@@ -270,39 +429,19 @@ impl FilteringExpr {
         }
     }
 
-    /// Returns a value indicating if the given binary is accepted by this filter expression.
+    /// Returns a value indicating if the given binary is accepted by this filterset.
     ///
     /// The value is:
-    /// * `Some(true)` if this binary is definitely accepted by this filter expression.
+    /// * `Some(true)` if this binary is definitely accepted by this filterset.
     /// * `Some(false)` if this binary is definitely not accepted.
     /// * `None` if this binary might or might not be accepted.
-    pub fn matches_binary(&self, query: &BinaryQuery<'_>) -> Option<bool> {
-        use ExprFrame::*;
-        Wrapped(&self.compiled).collapse_frames(|layer: ExprFrame<&FilteringSet, Option<bool>>| {
-            match layer {
-                Set(set) => set.matches_binary(query),
-                Not(a) => a.logic_not(),
-                // TODO: or_else/and_then?
-                Union(a, b) => a.logic_or(b),
-                Intersection(a, b) => a.logic_and(b),
-                Difference(a, b) => a.logic_and(b.logic_not()),
-                Parens(a) => a,
-            }
-        })
+    pub fn matches_binary(&self, query: &BinaryQuery<'_>, cx: &EvalContext<'_>) -> Option<bool> {
+        self.compiled.matches_binary(query, cx)
     }
 
-    /// Returns true if the given test is accepted by this filter expression.
-    pub fn matches_test(&self, query: &TestQuery<'_>) -> bool {
-        use ExprFrame::*;
-        Wrapped(&self.compiled).collapse_frames(|layer: ExprFrame<&FilteringSet, bool>| match layer
-        {
-            Set(set) => set.matches_test(query),
-            Not(a) => !a,
-            Union(a, b) => a || b,
-            Intersection(a, b) => a && b,
-            Difference(a, b) => a && !b,
-            Parens(a) => a,
-        })
+    /// Returns true if the given test is accepted by this filterset.
+    pub fn matches_test(&self, query: &TestQuery<'_>, cx: &EvalContext<'_>) -> bool {
+        self.compiled.matches_test(query, cx)
     }
 
     /// Returns true if the given expression needs dependencies information to work
@@ -422,9 +561,24 @@ impl<Set> MappableFrame for ExprFrame<Set, PartiallyApplied> {
         use ExprFrame::*;
         match input {
             Not(a) => Not(f(a)),
-            Union(a, b) => Union(f(a), f(b)),
-            Intersection(a, b) => Intersection(f(a), f(b)),
-            Difference(a, b) => Difference(f(a), f(b)),
+            // Note: reverse the order because the recursion crate processes
+            // entries via a stack, as LIFO. Calling f(b) before f(a) means
+            // error messages for a show up before those for b.
+            Union(a, b) => {
+                let b = f(b);
+                let a = f(a);
+                Union(a, b)
+            }
+            Intersection(a, b) => {
+                let b = f(b);
+                let a = f(a);
+                Intersection(a, b)
+            }
+            Difference(a, b) => {
+                let b = f(b);
+                let a = f(a);
+                Difference(a, b)
+            }
             Parens(a) => Parens(f(a)),
             Set(f) => Set(f),
         }
@@ -435,7 +589,7 @@ impl<Set> MappableFrame for ExprFrame<Set, PartiallyApplied> {
 pub(crate) struct Wrapped<T>(pub(crate) T);
 
 impl<'a> Collapsible for Wrapped<&'a CompiledExpr> {
-    type FrameToken = ExprFrame<&'a FilteringSet, PartiallyApplied>;
+    type FrameToken = ExprFrame<&'a FiltersetLeaf, PartiallyApplied>;
 
     fn into_frame(self) -> <Self::FrameToken as MappableFrame>::Frame<Self> {
         match self.0 {

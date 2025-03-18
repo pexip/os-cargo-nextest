@@ -1,12 +1,10 @@
 // Copyright (c) The nextest Contributors
-use std::{
-    env,
-    io::Read,
-    path::{Path, PathBuf},
-};
+use std::{env, io::Read, path::PathBuf};
 
 #[test]
 fn test_success() {
+    assert_with_retries_serial();
+
     // Check that MY_ENV_VAR (set by the setup script) isn't enabled.
     assert_eq!(
         std::env::var("MY_ENV_VAR"),
@@ -66,10 +64,33 @@ fn test_failure_should_panic() {}
 
 #[test]
 fn test_cwd() {
-    // Ensure that the cwd is correct.
+    // Ensure that the cwd is correct. It's a bit tricky to do this in the face
+    // of a relative path, but just ensure that the cwd looks like what it
+    // should be (has a `Cargo.toml` with `name = "nextest-tests"` within it).
     let runtime_cwd = env::current_dir().expect("should be able to read current dir");
-    let compile_time_cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
-    assert_eq!(runtime_cwd, compile_time_cwd, "current dir matches");
+    let cargo_toml_path = runtime_cwd.join("Cargo.toml");
+    let cargo_toml =
+        std::fs::read_to_string(runtime_cwd.join("Cargo.toml")).unwrap_or_else(|error| {
+            panic!(
+                "error reading Cargo.toml at `{}`: {error}",
+                cargo_toml_path.display()
+            )
+        });
+    assert!(
+        cargo_toml.contains("name = \"nextest-tests\""),
+        "{} contains name = \"nextest-tests\"",
+        cargo_toml_path.display()
+    );
+
+    // Also ensure that the runtime cwd and the runtime CARGO_MANIFEST_DIR are
+    // the same.
+    let runtime_cargo_manifest_dir =
+        env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set");
+    assert_eq!(
+        runtime_cwd,
+        PathBuf::from(runtime_cargo_manifest_dir),
+        "runtime cwd and CARGO_MANIFEST_DIR are the same"
+    );
 }
 
 #[test]
@@ -85,6 +106,7 @@ fn test_ignored_fail() {
 /// Test that a binary can be successfully executed.
 #[test]
 fn test_execute_bin() {
+    assert_with_retries_serial();
     nextest_tests::test_execute_bin_helper();
 }
 
@@ -138,6 +160,11 @@ fn test_cargo_env_vars() {
         .expect("NEXTEST_RUN_ID must be set")
         .parse::<uuid::Uuid>()
         .expect("NEXTEST_RUN_ID must be a UUID");
+    let global_slot = std::env::var("NEXTEST_TEST_GLOBAL_SLOT")
+        .expect("NEXTEST_TEST_GLOBAL_SLOT must be set")
+        .parse::<u64>()
+        .expect("NEXTEST_TEST_GLOBAL_SLOT must be a u64");
+    println!("NEXTEST_TEST_GLOBAL_SLOT = {global_slot}");
 
     assert_eq!(
         std::env::var("NEXTEST_EXECUTION_MODE").as_deref(),
@@ -149,10 +176,8 @@ fn test_cargo_env_vars() {
 
     // Note: we do not test CARGO here because nextest does not set it -- it's set by Cargo when
     // invoked as `cargo nextest`.
-    assert_env!(
-        "CARGO_MANIFEST_DIR",
-        "__NEXTEST_ORIGINAL_CARGO_MANIFEST_DIR"
-    );
+    // Also, CARGO_MANIFEST_DIR is tested separately by test_cwd.
+
     assert_env!("CARGO_PKG_VERSION");
     assert_env!("CARGO_PKG_VERSION_MAJOR");
     assert_env!("CARGO_PKG_VERSION_MINOR");
@@ -263,6 +288,10 @@ fn test_cargo_env_vars() {
     );
 
     assert_eq!(std::env::var("MY_ENV_VAR").as_deref(), Ok("my-env-var"));
+    assert_eq!(
+        std::env::var("SCRIPT_NEXTEST_PROFILE").expect("SCRIPT_NEXTEST_PROFILE is set by script"),
+        std::env::var("NEXTEST_PROFILE").expect("NEXTEST_PROFILE is set by nextest"),
+    );
 }
 
 #[test]
@@ -308,6 +337,15 @@ fn test_subprocess_doesnt_exit() {
     cmd.spawn().unwrap();
 }
 
+#[cfg(any(unix, windows))]
+#[test]
+fn test_subprocess_doesnt_exit_fail() {
+    let mut cmd = sleep_cmd(360);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.spawn().unwrap();
+    panic!("this is a panic");
+}
+
 #[cfg(windows)]
 fn sleep_cmd(secs: usize) -> std::process::Command {
     // Apparently, this is the most reliable way to sleep for a bit on Windows.
@@ -338,4 +376,24 @@ fn test_stdin_closed() {
             .read(&mut buf)
             .expect("reading from /dev/null succeeded")
     );
+}
+
+/// Asserts that if the with-retries profile is set, the test group slot is 0.
+///
+/// This should be called if and only if the test-group is serial.
+fn assert_with_retries_serial() {
+    let profile = std::env::var("NEXTEST_PROFILE").expect("NEXTEST_PROFILE should be set");
+    let group = std::env::var("NEXTEST_TEST_GROUP").expect("NEXTEST_TEST_GROUP should be set");
+    let group_slot =
+        std::env::var("NEXTEST_TEST_GROUP_SLOT").expect("NEXTEST_TEST_GROUP_SLOT should be set");
+    println!("NEXTEST_TEST_GROUP = {group}, NEXTEST_TEST_GROUP_SLOT = {group_slot}");
+
+    if profile == "with-retries" {
+        assert_eq!(group, "serial", "NEXTEST_TEST_GROUP should be serial");
+        // This test is in a serial group, so the group slot should be 0.
+        assert_eq!(group_slot, "0", "NEXTEST_TEST_GROUP_SLOT should be 0");
+    } else {
+        assert_eq!(group, "@global", "NEXTEST_TEST_GROUP should be @global");
+        assert_eq!(group_slot, "none", "NEXTEST_TEST_GROUP_SLOT should be none");
+    }
 }

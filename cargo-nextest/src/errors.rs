@@ -1,15 +1,18 @@
 // Copyright (c) The nextest Contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::{ExtractOutputFormat, output::StderrStyles};
 use camino::Utf8PathBuf;
+use indent_write::indentable::Indented;
 use itertools::Itertools;
-use nextest_filtering::errors::FilterExpressionParseErrors;
+use nextest_filtering::errors::FiltersetParseErrors;
 use nextest_metadata::NextestExitCode;
 use nextest_runner::{errors::*, redact::Redactor};
-use owo_colors::{OwoColorize, Stream};
+use owo_colors::OwoColorize;
 use semver::Version;
 use std::{error::Error, string::FromUtf8Error};
 use thiserror::Error;
+use tracing::{Level, error, info};
 
 pub(crate) type Result<T, E = ExpectedError> = std::result::Result<T, E>;
 
@@ -30,6 +33,11 @@ pub enum ReuseBuildKind {
 pub enum ExpectedError {
     #[error("could not change to requested directory")]
     SetCurrentDirFailed { error: std::io::Error },
+    #[error("failed to get current executable")]
+    GetCurrentExeFailed {
+        #[source]
+        err: std::io::Error,
+    },
     #[error("cargo metadata exec failed")]
     CargoMetadataExecFailed {
         command: String,
@@ -83,9 +91,9 @@ pub enum ExpectedError {
         err: TestFilterBuilderError,
     },
     #[error("unknown host platform")]
-    UnknownHostPlatform {
+    HostPlatformDetectError {
         #[from]
-        err: UnknownHostPlatform,
+        err: HostPlatformDetectError,
     },
     #[error("target triple error")]
     TargetTripleError {
@@ -171,6 +179,11 @@ pub enum ExpectedError {
         err: WriteEventError,
     },
     #[error(transparent)]
+    TestRunnerExecuteErrors {
+        #[from]
+        err: TestRunnerExecuteErrors<WriteEventError>,
+    },
+    #[error(transparent)]
     ConfigureHandleInheritanceError {
         #[from]
         err: ConfigureHandleInheritanceError,
@@ -184,6 +197,12 @@ pub enum ExpectedError {
     SetupScriptFailed,
     #[error("test run failed")]
     TestRunFailed,
+    #[error("no tests to run")]
+    NoTestsRun {
+        /// The no-tests-run error was chosen because it was the default (we show a hint in this
+        /// case)
+        is_default: bool,
+    },
     #[cfg(feature = "self-update")]
     #[error("failed to parse --version")]
     UpdateVersionParseError {
@@ -217,9 +236,9 @@ pub enum ExpectedError {
         name: &'static str,
         var_name: &'static str,
     },
-    #[error("filter expression parse error")]
-    FilterExpressionParseError {
-        all_errors: Vec<FilterExpressionParseErrors>,
+    #[error("filterset parse error")]
+    FiltersetParseError {
+        all_errors: Vec<FiltersetParseErrors>,
     },
     #[error("test binary args parse error")]
     TestBinaryArgsParseError {
@@ -242,6 +261,19 @@ pub enum ExpectedError {
     InvalidMessageFormatVersion {
         #[from]
         err: FormatVersionError,
+    },
+    #[error("extract read error")]
+    DebugExtractReadError {
+        kind: &'static str,
+        path: Utf8PathBuf,
+        #[source]
+        err: std::io::Error,
+    },
+    #[error("extract write error")]
+    DebugExtractWriteError {
+        format: ExtractOutputFormat,
+        #[source]
+        err: std::io::Error,
     },
 }
 
@@ -310,7 +342,7 @@ impl ExpectedError {
         }
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn experimental_feature_error(name: &'static str, var_name: &'static str) -> Self {
         Self::ExperimentalFeatureNotEnabled { name, var_name }
     }
@@ -335,10 +367,8 @@ impl ExpectedError {
         }
     }
 
-    pub(crate) fn filter_expression_parse_error(
-        all_errors: Vec<FilterExpressionParseErrors>,
-    ) -> Self {
-        Self::FilterExpressionParseError { all_errors }
+    pub(crate) fn filter_expression_parse_error(all_errors: Vec<FiltersetParseErrors>) -> Self {
+        Self::FiltersetParseError { all_errors }
     }
 
     pub(crate) fn setup_script_failed() -> Self {
@@ -363,12 +393,13 @@ impl ExpectedError {
             Self::WorkspaceRootInvalidUtf8 { .. }
             | Self::WorkspaceRootInvalid { .. }
             | Self::SetCurrentDirFailed { .. }
+            | Self::GetCurrentExeFailed { .. }
             | Self::ProfileNotFound { .. }
             | Self::StoreDirCreateError { .. }
             | Self::RootManifestNotFound { .. }
             | Self::CargoConfigError { .. }
             | Self::TestFilterBuilderError { .. }
-            | Self::UnknownHostPlatform { .. }
+            | Self::HostPlatformDetectError { .. }
             | Self::TargetTripleError { .. }
             | Self::MetadataMaterializeError { .. }
             | Self::UnknownArchiveFormat { .. }
@@ -382,7 +413,8 @@ impl ExpectedError {
             | Self::DialoguerError { .. }
             | Self::SignalHandlerSetupError { .. }
             | Self::ShowTestGroupsError { .. }
-            | Self::InvalidMessageFormatVersion { .. } => NextestExitCode::SETUP_ERROR,
+            | Self::InvalidMessageFormatVersion { .. }
+            | Self::DebugExtractReadError { .. } => NextestExitCode::SETUP_ERROR,
             Self::ConfigParseError { err } => {
                 // Experimental features not being enabled are their own error.
                 match err.kind() {
@@ -406,31 +438,36 @@ impl ExpectedError {
             }
             Self::SetupScriptFailed => NextestExitCode::SETUP_SCRIPT_FAILED,
             Self::TestRunFailed => NextestExitCode::TEST_RUN_FAILED,
+            Self::NoTestsRun { .. } => NextestExitCode::NO_TESTS_RUN,
             Self::ArchiveCreateError { .. } => NextestExitCode::ARCHIVE_CREATION_FAILED,
-            Self::WriteTestListError { .. } | Self::WriteEventError { .. } => {
-                NextestExitCode::WRITE_OUTPUT_ERROR
-            }
+            Self::WriteTestListError { .. }
+            | Self::WriteEventError { .. }
+            // TestRunnerExecuteErrors isn't _quite_ a WRITE_OUTPUT_ERROR, but
+            // we keep this for backwards compatibility.
+            | Self::TestRunnerExecuteErrors { .. }
+            | Self::DebugExtractWriteError { .. } => NextestExitCode::WRITE_OUTPUT_ERROR,
             #[cfg(feature = "self-update")]
             Self::UpdateError { .. } => NextestExitCode::UPDATE_ERROR,
             Self::ExperimentalFeatureNotEnabled { .. } => {
                 NextestExitCode::EXPERIMENTAL_FEATURE_NOT_ENABLED
             }
-            Self::FilterExpressionParseError { .. } => NextestExitCode::INVALID_FILTER_EXPRESSION,
+            Self::FiltersetParseError { .. } => NextestExitCode::INVALID_FILTERSET,
         }
     }
 
     /// Displays this error to stderr.
-    pub fn display_to_stderr(&self) {
+    pub fn display_to_stderr(&self, styles: &StderrStyles) {
         let mut next_error = match &self {
             Self::SetCurrentDirFailed { error } => {
-                log::error!("could not change to requested directory");
+                error!("could not change to requested directory");
                 Some(error as &dyn Error)
             }
+            Self::GetCurrentExeFailed { err } => {
+                error!("failed to get current executable");
+                Some(err as &dyn Error)
+            }
             Self::CargoMetadataExecFailed { command, err } => {
-                log::error!(
-                    "failed to execute `{}`",
-                    command.if_supports_color(Stream::Stderr, |x| x.bold())
-                );
+                error!("failed to execute `{}`", command.style(styles.bold));
                 Some(err as &dyn Error)
             }
             Self::CargoMetadataFailed { .. } => {
@@ -438,10 +475,7 @@ impl ExpectedError {
                 None
             }
             Self::CargoLocateProjectExecFailed { command, err } => {
-                log::error!(
-                    "failed to execute `{}`",
-                    command.if_supports_color(Stream::Stderr, |x| x.bold())
-                );
+                error!("failed to execute `{}`", command.style(styles.bold));
                 Some(err as &dyn Error)
             }
             Self::CargoLocateProjectFailed { .. } => {
@@ -449,18 +483,18 @@ impl ExpectedError {
                 None
             }
             Self::WorkspaceRootInvalidUtf8 { err } => {
-                log::error!("workspace root is not valid UTF-8");
+                error!("workspace root is not valid UTF-8");
                 Some(err as &dyn Error)
             }
             Self::WorkspaceRootInvalid { workspace_root } => {
-                log::error!(
+                error!(
                     "workspace root `{}` is invalid",
-                    workspace_root.if_supports_color(Stream::Stderr, |x| x.bold())
+                    workspace_root.style(styles.bold)
                 );
                 None
             }
             Self::ProfileNotFound { err } => {
-                log::error!("{}", err);
+                error!("{}", err);
                 err.source()
             }
             Self::RootManifestNotFound {
@@ -471,7 +505,7 @@ impl ExpectedError {
                     ReuseBuildKind::ReuseWithWorkspaceRemap { workspace_root } => {
                         format!(
                             "\n(hint: ensure that project source is available at {})",
-                            workspace_root.if_supports_color(Stream::Stderr, |x| x.bold())
+                            workspace_root.style(styles.bold)
                         )
                     }
                     ReuseBuildKind::Reuse => {
@@ -481,38 +515,61 @@ impl ExpectedError {
                     }
                     ReuseBuildKind::Normal => String::new(),
                 };
-                log::error!(
+                error!(
                     "workspace root manifest at {} does not exist{hint_str}",
-                    path.if_supports_color(Stream::Stderr, |x| x.bold())
+                    path.style(styles.bold)
                 );
                 None
             }
             Self::StoreDirCreateError { store_dir, err } => {
-                log::error!(
+                error!(
                     "failed to create store dir at `{}`",
-                    store_dir.if_supports_color(Stream::Stderr, |x| x.bold())
+                    store_dir.style(styles.bold)
                 );
                 Some(err as &dyn Error)
             }
             Self::CargoConfigError { err } => {
-                log::error!("{}", err);
+                error!("{}", err);
                 err.source()
             }
             Self::ConfigParseError { err } => {
                 match err.kind() {
-                    ConfigParseErrorKind::CompiledDataParseError(errors) => {
-                        // Override errors are printed out using miette.
-                        for override_error in errors {
-                            log::error!(
-                                "for config file `{}`{}, failed to parse overrides for profile: {}",
+                    ConfigParseErrorKind::CompileErrors(errors) => {
+                        // Compile errors are printed out using miette.
+                        for compile_error in errors {
+                            let section_str = match &compile_error.section {
+                                ConfigCompileSection::DefaultFilter => {
+                                    format!("profile.{}.default-filter", compile_error.profile_name)
+                                        .style(styles.bold)
+                                        .to_string()
+                                }
+                                ConfigCompileSection::Override(index) => {
+                                    let overrides =
+                                        format!("profile.{}.overrides", compile_error.profile_name);
+                                    format!(
+                                        "{} at index {}",
+                                        overrides.style(styles.bold),
+                                        index.style(styles.bold)
+                                    )
+                                }
+                                ConfigCompileSection::Script(index) => {
+                                    let scripts =
+                                        format!("profile.{}.scripts", compile_error.profile_name);
+                                    format!(
+                                        "{} at index {}",
+                                        scripts.style(styles.bold),
+                                        index.style(styles.bold)
+                                    )
+                                }
+                            };
+                            error!(
+                                "for config file `{}`{}, failed to parse {}",
                                 err.config_file(),
                                 provided_by_tool(err.tool()),
-                                override_error
-                                    .profile_name
-                                    .if_supports_color(Stream::Stderr, |p| p.bold()),
+                                section_str.style(styles.bold)
                             );
-                            for report in override_error.reports() {
-                                log::error!(target: "cargo_nextest::no_heading", "{report:?}");
+                            for report in compile_error.kind.reports() {
+                                error!(target: "cargo_nextest::no_heading", "{report:?}");
                             }
                         }
                         None
@@ -523,22 +580,18 @@ impl ExpectedError {
                     } => {
                         let known_groups_str = known_groups
                             .iter()
-                            .map(|group_name| {
-                                group_name.if_supports_color(Stream::Stderr, |x| x.bold())
-                            })
+                            .map(|group_name| group_name.style(styles.bold))
                             .join(", ");
                         let mut errors_str = String::new();
                         for error in errors {
                             errors_str.push_str(&format!(
                                 " - group `{}` in overrides for profile `{}`\n",
-                                error.name.if_supports_color(Stream::Stderr, |x| x.bold()),
-                                error
-                                    .profile_name
-                                    .if_supports_color(Stream::Stderr, |x| x.bold())
+                                error.name.style(styles.bold),
+                                error.profile_name.style(styles.bold)
                             ));
                         }
 
-                        log::error!(
+                        error!(
                             "for config file `{}`{}, unknown test groups defined \
                             (known groups: {known_groups_str}):\n{errors_str}",
                             err.config_file(),
@@ -552,22 +605,18 @@ impl ExpectedError {
                     } => {
                         let known_scripts_str = known_scripts
                             .iter()
-                            .map(|group_name| {
-                                group_name.if_supports_color(Stream::Stderr, |x| x.bold())
-                            })
+                            .map(|group_name| group_name.style(styles.bold))
                             .join(", ");
                         let mut errors_str = String::new();
                         for error in errors {
                             errors_str.push_str(&format!(
                                 " - script `{}` specified within profile `{}`\n",
-                                error.name.if_supports_color(Stream::Stderr, |x| x.bold()),
-                                error
-                                    .profile_name
-                                    .if_supports_color(Stream::Stderr, |x| x.bold())
+                                error.name.style(styles.bold),
+                                error.profile_name.style(styles.bold)
                             ));
                         }
 
-                        log::error!(
+                        error!(
                             "for config file `{}`{}, unknown scripts defined \
                         (known scripts: {known_scripts_str}):\n{errors_str}",
                             err.config_file(),
@@ -578,18 +627,14 @@ impl ExpectedError {
                     ConfigParseErrorKind::UnknownExperimentalFeatures { unknown, known } => {
                         let unknown_str = unknown
                             .iter()
-                            .map(|feature_name| {
-                                feature_name.if_supports_color(Stream::Stderr, |x| x.bold())
-                            })
+                            .map(|feature_name| feature_name.style(styles.bold))
                             .join(", ");
                         let known_str = known
                             .iter()
-                            .map(|feature_name| {
-                                feature_name.if_supports_color(Stream::Stderr, |x| x.bold())
-                            })
+                            .map(|feature_name| feature_name.style(styles.bold))
                             .join(", ");
 
-                        log::error!(
+                        error!(
                             "for config file `{}`{}, unknown experimental features defined:
                              {unknown_str} (known features: {known_str}):",
                             err.config_file(),
@@ -599,34 +644,40 @@ impl ExpectedError {
                     }
                     _ => {
                         // These other errors are printed out normally.
-                        log::error!("{}", err);
+                        error!("{}", err);
                         err.source()
                     }
                 }
             }
             Self::TestFilterBuilderError { err } => {
-                log::error!("{err}");
+                error!("{err}");
                 err.source()
             }
-            Self::UnknownHostPlatform { err } => {
-                log::error!("the host platform was unknown to nextest");
+            Self::HostPlatformDetectError { err } => {
+                error!("the host platform could not be detected");
                 Some(err as &dyn Error)
             }
             Self::TargetTripleError { err } => {
-                log::error!("{err}");
-                err.source()
+                if let Some(report) = err.source_report() {
+                    // Display the miette report if available.
+                    error!(target: "cargo_nextest::no_heading", "{report:?}");
+                    None
+                } else {
+                    error!("{err}");
+                    err.source()
+                }
             }
             Self::MetadataMaterializeError { arg_name, err } => {
-                log::error!(
+                error!(
                     "error reading metadata from argument {}",
-                    format!("--{arg_name}").if_supports_color(Stream::Stderr, |x| x.bold())
+                    format!("--{arg_name}").style(styles.bold)
                 );
                 Some(err as &dyn Error)
             }
             Self::UnknownArchiveFormat { archive_file, err } => {
-                log::error!(
+                error!(
                     "failed to autodetect archive format for {}",
-                    archive_file.if_supports_color(Stream::Stderr, |x| x.bold())
+                    archive_file.style(styles.bold)
                 );
                 Some(err as &dyn Error)
             }
@@ -635,104 +686,106 @@ impl ExpectedError {
                 err,
                 redactor,
             } => {
-                log::error!(
+                error!(
                     "error creating archive `{}`",
-                    redactor
-                        .redact_path(archive_file)
-                        .if_supports_color(Stream::Stderr, |x| x.bold())
+                    redactor.redact_path(archive_file).style(styles.bold)
                 );
                 Some(err as &dyn Error)
             }
             Self::ArchiveExtractError { archive_file, err } => {
-                log::error!(
+                error!(
                     "error extracting archive `{}`",
-                    archive_file.if_supports_color(Stream::Stderr, |x| x.bold())
+                    archive_file.style(styles.bold)
                 );
                 Some(err as &dyn Error)
             }
             Self::RustBuildMetaParseError { err } => {
-                log::error!("error parsing Rust build metadata");
+                error!("error parsing Rust build metadata");
                 Some(err as &dyn Error)
             }
             Self::PathMapperConstructError { arg_name, err } => {
-                log::error!(
+                error!(
                     "argument {} specified `{}` that couldn't be read",
-                    format!("--{arg_name}").if_supports_color(Stream::Stderr, |x| x.bold()),
-                    err.input().if_supports_color(Stream::Stderr, |x| x.bold())
+                    format!("--{arg_name}").style(styles.bold),
+                    err.input().style(styles.bold)
                 );
                 Some(err as &dyn Error)
             }
             Self::CargoMetadataParseError { file_name, err } => {
                 let metadata_source = match file_name {
-                    Some(path) => format!(
-                        " from file `{}`",
-                        path.if_supports_color(Stream::Stderr, |x| x.bold())
-                    ),
+                    Some(path) => format!(" from file `{}`", path.style(styles.bold)),
                     None => "".to_owned(),
                 };
-                log::error!("error parsing Cargo metadata{}", metadata_source);
+                error!("error parsing Cargo metadata{}", metadata_source);
                 Some(err as &dyn Error)
             }
             Self::FromMessagesError { err } => {
-                log::error!("failed to parse messages generated by Cargo");
+                error!("failed to parse messages generated by Cargo");
                 Some(err as &dyn Error)
             }
             Self::CreateTestListError { err } => {
-                log::error!("creating test list failed");
+                error!("creating test list failed");
                 Some(err as &dyn Error)
             }
             Self::BuildExecFailed { command, err } => {
-                log::error!(
-                    "failed to execute `{}`",
-                    command.if_supports_color(Stream::Stderr, |x| x.bold())
-                );
+                error!("failed to execute `{}`", command.style(styles.bold));
                 Some(err as &dyn Error)
             }
             Self::BuildFailed { command, exit_code } => {
                 let with_code_str = match exit_code {
                     Some(code) => {
-                        format!(
-                            " with code {}",
-                            code.if_supports_color(Stream::Stderr, |x| x.bold())
-                        )
+                        format!(" with code {}", code.style(styles.bold))
                     }
                     None => "".to_owned(),
                 };
 
-                log::error!(
+                error!(
                     "command `{}` exited{}",
-                    command.if_supports_color(Stream::Stderr, |x| x.bold()),
+                    command.style(styles.bold),
                     with_code_str,
                 );
 
                 None
             }
             Self::TestRunnerBuildError { err } => {
-                log::error!("failed to build test runner");
+                error!("failed to build test runner");
                 Some(err as &dyn Error)
             }
             Self::ConfigureHandleInheritanceError { err } => {
-                log::error!("{err}");
+                error!("{err}");
                 err.source()
             }
             Self::WriteTestListError { err } => {
-                log::error!("failed to write test list to output");
+                error!("failed to write test list to output");
                 Some(err as &dyn Error)
             }
             Self::WriteEventError { err } => {
-                log::error!("failed to write event to output");
+                error!("failed to write event to output");
                 Some(err as &dyn Error)
             }
+            Self::TestRunnerExecuteErrors { err } => {
+                error!("{err}");
+                None
+            }
             Self::SetupScriptFailed => {
-                log::error!("setup script failed");
+                error!("setup script failed");
                 None
             }
             Self::TestRunFailed => {
-                log::error!("test run failed");
+                error!("test run failed");
+                None
+            }
+            Self::NoTestsRun { is_default } => {
+                let hint_str = if *is_default {
+                    "\n(hint: use `--no-tests` to customize)"
+                } else {
+                    ""
+                };
+                error!("no tests to run{hint_str}");
                 None
             }
             Self::ShowTestGroupsError { err } => {
-                log::error!("{err}");
+                error!("{err}");
                 err.source()
             }
             Self::RequiredVersionNotMet {
@@ -740,13 +793,13 @@ impl ExpectedError {
                 current,
                 tool,
             } => {
-                log::error!(
+                error!(
                     "this repository requires nextest version {}, but the current version is {}",
-                    required.if_supports_color(Stream::Stderr, |x| x.bold()),
-                    current.if_supports_color(Stream::Stderr, |x| x.bold()),
+                    required.style(styles.bold),
+                    current.style(styles.bold),
                 );
                 if let Some(tool) = tool {
-                    log::info!(
+                    info!(
                         target: "cargo_nextest::no_heading",
                         "(required version specified by tool `{}`)",
                         tool,
@@ -754,75 +807,87 @@ impl ExpectedError {
                 }
 
                 crate::helpers::log_needs_update(
-                    log::Level::Info,
+                    Level::INFO,
                     crate::helpers::BYPASS_VERSION_TEXT,
+                    styles,
                 );
                 None
             }
             #[cfg(feature = "self-update")]
             Self::UpdateVersionParseError { err } => {
-                log::error!("failed to parse --version");
+                error!("failed to parse --version");
                 Some(err as &dyn Error)
             }
             #[cfg(feature = "self-update")]
             Self::UpdateError { err } => {
-                log::error!(
+                error!(
                     "failed to update nextest (please update manually by visiting <{}>)",
-                    "https://get.nexte.st".if_supports_color(Stream::Stderr, |x| x.bold())
+                    "https://get.nexte.st".style(styles.bold)
                 );
                 Some(err as &dyn Error)
             }
             Self::DialoguerError { err } => {
-                log::error!("error reading input prompt");
+                error!("error reading input prompt");
                 Some(err as &dyn Error)
             }
             Self::SignalHandlerSetupError { err } => {
-                log::error!("error setting up signal handler");
+                error!("error setting up signal handler");
                 Some(err as &dyn Error)
             }
             Self::ExperimentalFeatureNotEnabled { name, var_name } => {
-                log::error!(
+                error!(
                     "{} is an experimental feature and must be enabled with {}=1",
-                    name,
-                    var_name
+                    name, var_name
                 );
                 None
             }
-            Self::FilterExpressionParseError { all_errors } => {
+            Self::FiltersetParseError { all_errors } => {
                 for errors in all_errors {
                     for single_error in &errors.errors {
                         let report = miette::Report::new(single_error.clone())
                             .with_source_code(errors.input.to_owned());
-                        log::error!(target: "cargo_nextest::no_heading", "{:?}", report);
+                        error!(target: "cargo_nextest::no_heading", "{:?}", report);
                     }
                 }
 
-                log::error!("failed to parse filter expression");
+                error!("failed to parse filterset");
                 None
             }
             Self::TestBinaryArgsParseError { reason, args } => {
-                log::error!(
+                error!(
                     "failed to parse test binary arguments `{}`: arguments are {reason}",
                     args.join(", "),
                 );
                 None
             }
             Self::DoubleSpawnParseArgsError { args, err } => {
-                log::error!("[double-spawn] failed to parse arguments `{args}`");
+                error!("[double-spawn] failed to parse arguments `{args}`");
                 Some(err as &dyn Error)
             }
             Self::DoubleSpawnExecError { command, err } => {
-                log::error!("[double-spawn] failed to exec `{command:?}`");
+                error!("[double-spawn] failed to exec `{command:?}`");
                 Some(err as &dyn Error)
             }
             Self::InvalidMessageFormatVersion { err } => {
-                log::error!("error parsing message format version");
+                error!("error parsing message format version");
+                Some(err as &dyn Error)
+            }
+            Self::DebugExtractReadError { kind, path, err } => {
+                error!("error reading {kind} file `{}`", path.style(styles.bold),);
+                Some(err as &dyn Error)
+            }
+            Self::DebugExtractWriteError { format, err } => {
+                error!("error writing {format} output");
                 Some(err as &dyn Error)
             }
         };
 
         while let Some(err) = next_error {
-            log::error!(target: "cargo_nextest::no_heading", "\nCaused by:\n  {}", err);
+            error!(
+                target: "cargo_nextest::no_heading",
+                "\nCaused by:\n{}",
+                Indented { item: err, indent: "  " },
+            );
             next_error = err.source();
         }
     }

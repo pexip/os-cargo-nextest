@@ -2,26 +2,29 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::{
-    cargo_cli::{CargoCli, CargoOptions},
-    output::{should_redact, OutputContext, OutputOpts, OutputWriter},
-    reuse_build::{make_path_mapper, ArchiveFormatOpt, ReuseBuildOpts},
     ExpectedError, Result, ReuseBuildKind,
+    cargo_cli::{CargoCli, CargoOptions},
+    output::{OutputContext, OutputOpts, OutputWriter, StderrStyles, should_redact},
+    reuse_build::{ArchiveFormatOpt, ReuseBuildOpts, make_path_mapper},
+    version,
 };
 use camino::{Utf8Path, Utf8PathBuf};
-use clap::{builder::BoolishValueParser, ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum, builder::BoolishValueParser};
 use guppy::graph::PackageGraph;
 use itertools::Itertools;
-use nextest_filtering::FilteringExpr;
+use nextest_filtering::{EvalContext, Filterset, FiltersetKind, ParseContext};
 use nextest_metadata::BuildPlatform;
 use nextest_runner::{
+    RustcCli,
     cargo_config::{CargoConfigs, EnvironmentMap, TargetTriple},
     config::{
-        get_num_cpus, ConfigExperimental, NextestConfig, NextestProfile, NextestVersionConfig,
-        NextestVersionEval, PreBuildPlatform, RetryPolicy, TestGroup, TestThreads, ToolConfigFile,
-        VersionOnlyConfig,
+        ConfigExperimental, EarlyProfile, MaxFail, NextestConfig, NextestVersionConfig,
+        NextestVersionEval, RetryPolicy, TestGroup, TestThreads, ToolConfigFile, VersionOnlyConfig,
+        get_num_cpus,
     },
     double_spawn::DoubleSpawnInfo,
-    errors::WriteTestListError,
+    errors::{TargetTripleError, WriteTestListError},
+    input::InputHandlerKind,
     list::{
         BinaryList, OutputFormat, RustTestArtifact, SerializableFormat, TestExecuteContext,
         TestList,
@@ -29,49 +32,73 @@ use nextest_runner::{
     partition::PartitionerBuilder,
     platform::{BuildPlatforms, HostPlatform, PlatformLibdir, TargetPlatform},
     redact::Redactor,
-    reporter::{structured, FinalStatusLevel, StatusLevel, TestOutputDisplay, TestReporterBuilder},
-    reuse_build::{archive_to_file, ArchiveReporter, PathMapper, ReuseBuildInfo},
-    runner::{configure_handle_inheritance, RunStatsFailureKind, TestRunnerBuilder},
+    reporter::{
+        FinalStatusLevel, ReporterBuilder, StatusLevel, TestOutputDisplay, TestOutputErrorSlice,
+        events::{FinalRunStats, RunStatsFailureKind},
+        highlight_end, structured,
+    },
+    reuse_build::{ArchiveReporter, PathMapper, ReuseBuildInfo, archive_to_file},
+    runner::{TestRunnerBuilder, configure_handle_inheritance},
     show_config::{ShowNextestVersion, ShowTestGroupSettings, ShowTestGroups, ShowTestGroupsMode},
     signal::SignalHandlerKind,
     target_runner::{PlatformRunner, TargetRunner},
-    test_filter::{RunIgnored, TestFilterBuilder},
+    test_filter::{FilterBound, RunIgnored, TestFilterBuilder, TestFilterPatterns},
     write_str::WriteStr,
-    RustcCli,
 };
-use once_cell::sync::OnceCell;
-use owo_colors::{OwoColorize, Stream, Style};
+use owo_colors::OwoColorize;
+use quick_junit::XmlString;
 use semver::Version;
 use std::{
     collections::BTreeSet,
     env::VarError,
+    fmt,
     io::{Cursor, Write},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
-use swrite::{swrite, SWrite};
+use swrite::{SWrite, swrite};
+use tracing::{Level, debug, info, warn};
 
 /// A next-generation test runner for Rust.
 ///
 /// This binary should typically be invoked as `cargo nextest` (in which case
 /// this message will not be seen), not `cargo-nextest`.
 #[derive(Debug, Parser)]
-#[command(version, bin_name = "cargo", styles = crate::output::clap_styles::style())]
+#[command(
+    version = version::short(),
+    long_version = version::long(),
+    bin_name = "cargo",
+    styles = crate::output::clap_styles::style(),
+    max_term_width = 100,
+)]
 pub struct CargoNextestApp {
     #[clap(subcommand)]
     subcommand: NextestSubcommand,
 }
 
 impl CargoNextestApp {
-    /// Executes the app.
-    pub fn exec(self, cli_args: Vec<String>, output_writer: &mut OutputWriter) -> Result<i32> {
-        #[cfg(feature = "experimental-tokio-console")]
-        nextest_runner::console::init();
-
-        match self.subcommand {
-            NextestSubcommand::Nextest(app) => app.exec(cli_args, output_writer),
-            NextestSubcommand::Ntr(opts) => opts.exec(cli_args, output_writer),
+    /// Initializes the output context.
+    pub fn init_output(&self) -> OutputContext {
+        match &self.subcommand {
+            NextestSubcommand::Nextest(args) => args.common.output.init(),
+            NextestSubcommand::Ntr(args) => args.common.output.init(),
             #[cfg(unix)]
-            NextestSubcommand::DoubleSpawn(opts) => opts.exec(),
+            // Double-spawned processes should never use coloring.
+            NextestSubcommand::DoubleSpawn(_) => OutputContext::color_never_init(),
+        }
+    }
+
+    /// Executes the app.
+    pub fn exec(
+        self,
+        cli_args: Vec<String>,
+        output: OutputContext,
+        output_writer: &mut OutputWriter,
+    ) -> Result<i32> {
+        match self.subcommand {
+            NextestSubcommand::Nextest(app) => app.exec(cli_args, output, output_writer),
+            NextestSubcommand::Ntr(opts) => opts.exec(cli_args, output, output_writer),
+            #[cfg(unix)]
+            NextestSubcommand::DoubleSpawn(opts) => opts.exec(output),
         }
     }
 }
@@ -89,7 +116,11 @@ enum NextestSubcommand {
 }
 
 #[derive(Debug, Args)]
-#[command(version)]
+#[clap(
+    version = version::short(),
+    long_version = version::long(),
+    display_name = "cargo-nextest",
+)]
 struct AppOpts {
     #[clap(flatten)]
     common: CommonOpts,
@@ -102,9 +133,12 @@ impl AppOpts {
     /// Execute the command.
     ///
     /// Returns the exit code.
-    fn exec(self, cli_args: Vec<String>, output_writer: &mut OutputWriter) -> Result<i32> {
-        let output = self.common.output.init();
-
+    fn exec(
+        self,
+        cli_args: Vec<String>,
+        output: OutputContext,
+        output_writer: &mut OutputWriter,
+    ) -> Result<i32> {
         match self.command {
             Command::List {
                 cargo_options,
@@ -137,7 +171,6 @@ impl AppOpts {
                 )?;
                 let app = App::new(base, run_opts.build_filter)?;
                 app.exec_run(
-                    run_opts.profile.as_deref(),
                     run_opts.no_capture,
                     &run_opts.runner_opts,
                     &run_opts.reporter_opts,
@@ -148,7 +181,6 @@ impl AppOpts {
             }
             Command::Archive {
                 cargo_options,
-                profile,
                 archive_file,
                 archive_format,
                 zstd_level,
@@ -161,22 +193,17 @@ impl AppOpts {
                     self.common.manifest_path,
                     output_writer,
                 )?;
-                app.exec_archive(
-                    profile.as_deref(),
-                    &archive_file,
-                    archive_format,
-                    zstd_level,
-                    output_writer,
-                )?;
+                app.exec_archive(&archive_file, archive_format, zstd_level, output_writer)?;
                 Ok(0)
             }
             Command::ShowConfig { command } => command.exec(
                 self.common.manifest_path,
-                self.common.output,
                 self.common.config_opts,
+                output,
                 output_writer,
             ),
             Command::Self_ { command } => command.exec(self.common.output),
+            Command::Debug { command } => command.exec(self.common.output),
         }
     }
 }
@@ -229,6 +256,20 @@ struct ConfigOpts {
     /// recommended versions of nextest. This option overrides those checks.
     #[arg(long, global = true)]
     pub override_version_check: bool,
+
+    /// The nextest profile to use.
+    ///
+    /// Nextest's configuration supports multiple profiles, which can be used to set up different
+    /// configurations for different purposes. (For example, a configuration for local runs and one
+    /// for CI.) This option selects the profile to use.
+    #[arg(
+        long,
+        short = 'P',
+        env = "NEXTEST_PROFILE",
+        global = true,
+        help_heading = "Config options"
+    )]
+    profile: Option<String>,
 }
 
 impl ConfigOpts {
@@ -246,12 +287,12 @@ impl ConfigOpts {
     pub fn make_config(
         &self,
         workspace_root: &Utf8Path,
-        graph: &PackageGraph,
+        pcx: &ParseContext<'_>,
         experimental: &BTreeSet<ConfigExperimental>,
     ) -> Result<NextestConfig> {
         NextestConfig::from_sources(
             workspace_root,
-            graph,
+            pcx,
             self.config_file.as_deref(),
             &self.tool_config_files,
             experimental,
@@ -271,7 +312,7 @@ enum Command {
     ///
     /// Use --message-format json to get machine-readable output.
     ///
-    /// For more information, see <https://nexte.st/book/listing>.
+    /// For more information, see <https://nexte.st/docs/listing>.
     List {
         #[clap(flatten)]
         cargo_options: CargoOptions,
@@ -308,7 +349,7 @@ enum Command {
     /// This command builds test binaries and queries them for the tests they contain,
     /// then runs each test in parallel.
     ///
-    /// For more information, see <https://nexte.st/book/running>.
+    /// For more information, see <https://nexte.st/docs/running>.
     #[command(visible_alias = "r")]
     Run(RunOpts),
     /// Build and archive tests
@@ -321,10 +362,6 @@ enum Command {
     Archive {
         #[clap(flatten)]
         cargo_options: CargoOptions,
-
-        /// Nextest profile to use
-        #[arg(long, short = 'P', env = "NEXTEST_PROFILE")]
-        profile: Option<String>,
 
         /// File to write archive to
         #[arg(
@@ -375,6 +412,15 @@ enum Command {
         #[clap(subcommand)]
         command: SelfCommand,
     },
+    /// Debug commands
+    ///
+    /// The commands in this section are for nextest's own developers and those integrating with it
+    /// to debug issues. They are not part of the public API and may change at any time.
+    #[clap(hide = true)]
+    Debug {
+        #[clap(subcommand)]
+        command: DebugCommand,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -387,9 +433,12 @@ struct NtrOpts {
 }
 
 impl NtrOpts {
-    fn exec(self, cli_args: Vec<String>, output_writer: &mut OutputWriter) -> Result<i32> {
-        let output = self.common.output.init();
-
+    fn exec(
+        self,
+        cli_args: Vec<String>,
+        output: OutputContext,
+        output_writer: &mut OutputWriter,
+    ) -> Result<i32> {
         let base = BaseApp::new(
             output,
             self.run_opts.reuse_build,
@@ -400,23 +449,17 @@ impl NtrOpts {
         )?;
         let app = App::new(base, self.run_opts.build_filter)?;
         app.exec_run(
-            self.run_opts.profile.as_deref(),
             self.run_opts.no_capture,
             &self.run_opts.runner_opts,
             &self.run_opts.reporter_opts,
             cli_args,
             output_writer,
-        )?;
-        Ok(0)
+        )
     }
 }
 
 #[derive(Debug, Args)]
 struct RunOpts {
-    /// Nextest profile to use
-    #[arg(long, short = 'P', env = "NEXTEST_PROFILE")]
-    profile: Option<String>,
-
     #[clap(flatten)]
     cargo_options: CargoOptions,
 
@@ -437,7 +480,7 @@ struct RunOpts {
     no_capture: bool,
 
     #[clap(flatten)]
-    reporter_opts: TestReporterOpts,
+    reporter_opts: ReporterOpts,
 
     #[clap(flatten)]
     reuse_build: ReuseBuildOpts,
@@ -524,21 +567,42 @@ struct TestBuildFilter {
     )]
     pub(crate) platform_filter: PlatformFilterOpts,
 
-    /// Test filter expression (see {n}<https://nexte.st/book/filter-expressions>)
-    #[arg(long, short = 'E', value_name = "EXPR", action(ArgAction::Append))]
-    filter_expr: Vec<String>,
+    /// Test filterset (see {n}<https://nexte.st/docs/filtersets>).
+    #[arg(
+        long,
+        alias = "filter-expr",
+        short = 'E',
+        value_name = "EXPR",
+        action(ArgAction::Append)
+    )]
+    filterset: Vec<String>,
 
-    /// Test name filters
+    /// Ignore the default filter configured in the profile.
+    ///
+    /// By default, all filtersets are intersected with the default filter configured in the
+    /// profile. This flag disables that behavior.
+    ///
+    /// This flag doesn't change the definition of the `default()` filterset.
+    #[arg(long)]
+    ignore_default_filter: bool,
+
+    /// Test name filters.
     #[arg(help_heading = None, name = "FILTERS")]
     pre_double_dash_filters: Vec<String>,
 
-    /// Test name filters and emulated test binary arguments (partially supported)
+    /// Test name filters and emulated test binary arguments.
+    ///
+    /// Supported arguments:{n}
+    /// - --ignored:         Only run ignored tests{n}
+    /// - --include-ignored: Run both ignored and non-ignored tests{n}
+    /// - --skip PATTERN:    Skip tests that match the pattern{n}
+    /// - --exact:           Run tests that exactly match patterns after `--`
     #[arg(help_heading = None, value_name = "FILTERS_AND_ARGS", last = true)]
     filters: Vec<String>,
 }
 
 impl TestBuildFilter {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn compute_test_list<'g>(
         &self,
         ctx: &TestExecuteContext<'_>,
@@ -547,6 +611,7 @@ impl TestBuildFilter {
         binary_list: Arc<BinaryList>,
         test_filter_builder: TestFilterBuilder,
         env: EnvironmentMap,
+        ecx: &EvalContext<'_>,
         reuse_build: &ReuseBuildInfo,
     ) -> Result<TestList<'g>> {
         let path_mapper = make_path_mapper(
@@ -570,25 +635,28 @@ impl TestBuildFilter {
             &test_filter_builder,
             workspace_root,
             env,
+            ecx,
+            if self.ignore_default_filter {
+                FilterBound::All
+            } else {
+                FilterBound::DefaultSet
+            },
             // TODO: do we need to allow customizing this?
             get_num_cpus(),
         )
         .map_err(|err| ExpectedError::CreateTestListError { err })
     }
 
-    fn make_test_filter_builder(
-        &self,
-        filter_exprs: Vec<FilteringExpr>,
-    ) -> Result<TestFilterBuilder> {
+    fn make_test_filter_builder(&self, filter_exprs: Vec<Filterset>) -> Result<TestFilterBuilder> {
         // Merge the test binary args into the patterns.
         let mut run_ignored = self.run_ignored.map(Into::into);
-        let mut patterns = self.pre_double_dash_filters.clone();
+        let mut patterns = TestFilterPatterns::new(self.pre_double_dash_filters.clone());
         self.merge_test_binary_args(&mut run_ignored, &mut patterns)?;
 
         Ok(TestFilterBuilder::new(
             run_ignored.unwrap_or_default(),
             self.partition.clone(),
-            &patterns,
+            patterns,
             filter_exprs,
         )?)
     }
@@ -596,39 +664,64 @@ impl TestBuildFilter {
     fn merge_test_binary_args(
         &self,
         run_ignored: &mut Option<RunIgnored>,
-        patterns: &mut Vec<String>,
+        patterns: &mut TestFilterPatterns,
     ) -> Result<()> {
+        // First scan to see if `--exact` is specified. If so, then everything here will be added to
+        // `--exact`.
+        let mut is_exact = false;
+        for arg in &self.filters {
+            if arg == "--" {
+                break;
+            }
+            if arg == "--exact" {
+                if is_exact {
+                    return Err(ExpectedError::test_binary_args_parse_error(
+                        "duplicated",
+                        vec![arg.clone()],
+                    ));
+                }
+                is_exact = true;
+            }
+        }
+
         let mut ignore_filters = Vec::new();
         let mut read_trailing_filters = false;
 
-        let mut skip_exact = Vec::new();
         let mut unsupported_args = Vec::new();
 
-        patterns.extend(
-            self.filters
-                .iter()
-                .filter(|&s| {
-                    if read_trailing_filters || !s.starts_with('-') {
-                        true
-                    } else if s == "--include-ignored" {
-                        ignore_filters.push((s.clone(), RunIgnored::All));
-                        false
-                    } else if s == "--ignored" {
-                        ignore_filters.push((s.clone(), RunIgnored::IgnoredOnly));
-                        false
-                    } else if s == "--" {
-                        read_trailing_filters = true;
-                        false
-                    } else if s == "--skip" || s == "--exact" {
-                        skip_exact.push(s.clone());
-                        false
-                    } else {
-                        unsupported_args.push(s.clone());
-                        true
-                    }
-                })
-                .cloned(),
-        );
+        let mut it = self.filters.iter();
+        while let Some(arg) = it.next() {
+            if read_trailing_filters || !arg.starts_with('-') {
+                if is_exact {
+                    patterns.add_exact_pattern(arg.clone());
+                } else {
+                    patterns.add_substring_pattern(arg.clone());
+                }
+            } else if arg == "--include-ignored" {
+                ignore_filters.push((arg.clone(), RunIgnored::All));
+            } else if arg == "--ignored" {
+                ignore_filters.push((arg.clone(), RunIgnored::Only));
+            } else if arg == "--" {
+                read_trailing_filters = true;
+            } else if arg == "--skip" {
+                let skip_arg = it.next().ok_or_else(|| {
+                    ExpectedError::test_binary_args_parse_error(
+                        "missing required argument",
+                        vec![arg.clone()],
+                    )
+                })?;
+
+                if is_exact {
+                    patterns.add_skip_exact_pattern(skip_arg.clone());
+                } else {
+                    patterns.add_skip_pattern(skip_arg.clone());
+                }
+            } else if arg == "--exact" {
+                // Already handled above.
+            } else {
+                unsupported_args.push(arg.clone());
+            }
+        }
 
         for (s, f) in ignore_filters {
             if let Some(run_ignored) = run_ignored {
@@ -648,27 +741,27 @@ impl TestBuildFilter {
             }
         }
 
-        if !skip_exact.is_empty() {
-            return Err(ExpectedError::test_binary_args_parse_error(
-                "unsupported\n(hint: use a filter expression instead: <https://nexte.st/book/filter-expressions>)",
-                skip_exact,
-            ));
-        }
-
         if !unsupported_args.is_empty() {
             return Err(ExpectedError::test_binary_args_parse_error(
                 "unsupported",
                 unsupported_args,
             ));
         }
+
         Ok(())
     }
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum RunIgnoredOpt {
+    /// Run non-ignored tests.
     Default,
-    IgnoredOnly,
+
+    /// Run ignored tests.
+    #[clap(alias = "ignored-only")]
+    Only,
+
+    /// Run both ignored and non-ignored tests.
     All,
 }
 
@@ -676,7 +769,7 @@ impl From<RunIgnoredOpt> for RunIgnored {
     fn from(opt: RunIgnoredOpt) -> Self {
         match opt {
             RunIgnoredOpt::Default => RunIgnored::Default,
-            RunIgnoredOpt::IgnoredOnly => RunIgnored::IgnoredOnly,
+            RunIgnoredOpt::Only => RunIgnored::Only,
             RunIgnoredOpt::All => RunIgnored::All,
         }
     }
@@ -748,12 +841,55 @@ pub struct TestRunnerOpts {
     retries: Option<usize>,
 
     /// Cancel test run on the first failure
-    #[arg(long, name = "fail-fast", conflicts_with = "no-run")]
+    #[arg(
+        long,
+        visible_alias = "ff",
+        name = "fail-fast",
+        conflicts_with = "no-run"
+    )]
     fail_fast: bool,
 
     /// Run all tests regardless of failure
-    #[arg(long, conflicts_with = "no-run", overrides_with = "fail-fast")]
+    #[arg(
+        long,
+        visible_alias = "nff",
+        name = "no-fail-fast",
+        conflicts_with = "no-run",
+        overrides_with = "fail-fast"
+    )]
     no_fail_fast: bool,
+
+    /// Number of tests that can fail before exiting test run [possible values: integer or "all"]
+    #[arg(
+        long,
+        name = "max-fail",
+        value_name = "N",
+        conflicts_with_all = &["no-run", "fail-fast", "no-fail-fast"],
+    )]
+    max_fail: Option<MaxFail>,
+
+    /// Behavior if there are no tests to run [default: fail]
+    #[arg(
+        long,
+        value_enum,
+        conflicts_with = "no-run",
+        value_name = "ACTION",
+        env = "NEXTEST_NO_TESTS"
+    )]
+    no_tests: Option<NoTestsBehavior>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum NoTestsBehavior {
+    /// Silently exit with code 0.
+    Pass,
+
+    /// Produce a warning and exit with code 0.
+    Warn,
+
+    /// Produce an error message and exit with code 4.
+    #[clap(alias = "error")]
+    Fail,
 }
 
 impl TestRunnerOpts {
@@ -770,11 +906,18 @@ impl TestRunnerOpts {
         if let Some(retries) = self.retries {
             builder.set_retries(RetryPolicy::new_without_delay(retries));
         }
-        if self.no_fail_fast {
-            builder.set_fail_fast(false);
+
+        if let Some(max_fail) = self.max_fail {
+            builder.set_max_fail(max_fail);
+            debug!(max_fail = ?max_fail, "set max fail");
+        } else if self.no_fail_fast {
+            builder.set_max_fail(MaxFail::from_fail_fast(false));
+            debug!("set max fail via from_fail_fast(false)");
         } else if self.fail_fast {
-            builder.set_fail_fast(true);
+            builder.set_max_fail(MaxFail::from_fail_fast(true));
+            debug!("set max fail via from_fail_fast(true)");
         }
+
         if let Some(test_threads) = self.test_threads {
             builder.set_test_threads(test_threads);
         }
@@ -803,7 +946,7 @@ enum MessageFormat {
 
 #[derive(Debug, Default, Args)]
 #[command(next_help_heading = "Reporter options")]
-struct TestReporterOpts {
+struct ReporterOpts {
     /// Output stdout and stderr on failure
     #[arg(
         long,
@@ -849,6 +992,13 @@ struct TestReporterOpts {
     #[arg(long, env = "NEXTEST_HIDE_PROGRESS_BAR", value_parser = BoolishValueParser::new())]
     hide_progress_bar: bool,
 
+    /// Disable handling of input keys from the terminal.
+    ///
+    /// By default, when running a terminal, nextest accepts the `t` key to dump
+    /// test information. This flag disables that behavior.
+    #[arg(long, env = "NEXTEST_NO_INPUT_HANDLER", value_parser = BoolishValueParser::new())]
+    no_input_handler: bool,
+
     /// Format to use for test results (experimental).
     #[arg(
         long,
@@ -875,10 +1025,12 @@ struct TestReporterOpts {
     message_format_version: Option<String>,
 }
 
-impl TestReporterOpts {
-    fn to_builder(&self, no_capture: bool) -> TestReporterBuilder {
-        let mut builder = TestReporterBuilder::default();
+impl ReporterOpts {
+    fn to_builder(&self, no_capture: bool, should_colorize: bool) -> ReporterBuilder {
+        let mut builder = ReporterBuilder::default();
         builder.set_no_capture(no_capture);
+        builder.set_colorize(should_colorize);
+
         if let Some(failure_output) = self.failure_output {
             builder.set_failure_output(failure_output.into());
         }
@@ -985,8 +1137,8 @@ struct BaseApp {
     current_version: Version,
 
     cargo_configs: CargoConfigs,
-    double_spawn: OnceCell<DoubleSpawnInfo>,
-    target_runner: OnceCell<TargetRunner>,
+    double_spawn: OnceLock<DoubleSpawnInfo>,
+    target_runner: OnceLock<TargetRunner>,
 }
 
 impl BaseApp {
@@ -1008,22 +1160,7 @@ impl BaseApp {
         // Next, read the build platforms.
         let build_platforms = match reuse_build.binaries_metadata() {
             Some(kind) => kind.binary_list.rust_build_meta.build_platforms.clone(),
-            None => {
-                let host = HostPlatform::current(PlatformLibdir::from_rustc_stdout(
-                    RustcCli::print_host_libdir().read(),
-                ))?;
-                let target = if let Some(triple) =
-                    discover_target_triple(&cargo_configs, cargo_opts.target.as_deref())
-                {
-                    let libdir = PlatformLibdir::from_rustc_stdout(
-                        RustcCli::print_target_libdir(&triple).read(),
-                    );
-                    Some(TargetPlatform::new(triple, libdir))
-                } else {
-                    None
-                };
-                BuildPlatforms { host, target }
-            }
+            None => detect_build_platforms(&cargo_configs, cargo_opts.target.as_deref())?,
         };
 
         // Read the Cargo metadata.
@@ -1087,12 +1224,12 @@ impl BaseApp {
             cargo_configs,
             current_version,
 
-            double_spawn: OnceCell::new(),
-            target_runner: OnceCell::new(),
+            double_spawn: OnceLock::new(),
+            target_runner: OnceLock::new(),
         })
     }
 
-    fn load_config(&self) -> Result<(VersionOnlyConfig, NextestConfig)> {
+    fn load_config(&self, pcx: &ParseContext<'_>) -> Result<(VersionOnlyConfig, NextestConfig)> {
         // Load the version-only config first to avoid incompatibilities with parsing the rest of
         // the config.
         let version_only_config = self
@@ -1102,7 +1239,7 @@ impl BaseApp {
 
         let experimental = version_only_config.experimental();
         if !experimental.is_empty() {
-            log::info!(
+            info!(
                 "experimental features enabled: {}",
                 experimental
                     .iter()
@@ -1114,7 +1251,7 @@ impl BaseApp {
 
         let config = self.config_opts.make_config(
             &self.workspace_root,
-            self.graph(),
+            pcx,
             version_only_config.experimental(),
         )?;
 
@@ -1122,6 +1259,8 @@ impl BaseApp {
     }
 
     fn check_version_config_initial(&self, version_cfg: &NextestVersionConfig) -> Result<()> {
+        let styles = self.output.stderr_styles();
+
         match version_cfg.eval(
             &self.current_version,
             self.config_opts.override_version_check,
@@ -1141,13 +1280,13 @@ impl BaseApp {
                 current,
                 tool,
             } => {
-                log::warn!(
+                warn!(
                     "this repository recommends nextest version {}, but the current version is {}",
-                    required.if_supports_color(Stream::Stderr, |x| x.bold()),
-                    current.if_supports_color(Stream::Stderr, |x| x.bold()),
+                    required.style(styles.bold),
+                    current.style(styles.bold),
                 );
                 if let Some(tool) = tool {
-                    log::info!(
+                    info!(
                         target: "cargo_nextest::no_heading",
                         "(recommended version specified by tool `{}`)",
                         tool,
@@ -1161,13 +1300,12 @@ impl BaseApp {
                 current,
                 tool,
             } => {
-                log::info!(
+                info!(
                     "overriding version check (required: {}, current: {})",
-                    required,
-                    current
+                    required, current
                 );
                 if let Some(tool) = tool {
-                    log::info!(
+                    info!(
                         target: "cargo_nextest::no_heading",
                         "(required version specified by tool `{}`)",
                         tool,
@@ -1181,13 +1319,12 @@ impl BaseApp {
                 current,
                 tool,
             } => {
-                log::info!(
+                info!(
                     "overriding version check (recommended: {}, current: {})",
-                    recommended,
-                    current,
+                    recommended, current,
                 );
                 if let Some(tool) = tool {
-                    log::info!(
+                    info!(
                         target: "cargo_nextest::no_heading",
                         "(recommended version specified by tool `{}`)",
                         tool,
@@ -1200,6 +1337,8 @@ impl BaseApp {
     }
 
     fn check_version_config_final(&self, version_cfg: &NextestVersionConfig) -> Result<()> {
+        let styles = self.output.stderr_styles();
+
         match version_cfg.eval(
             &self.current_version,
             self.config_opts.override_version_check,
@@ -1219,13 +1358,13 @@ impl BaseApp {
                 current,
                 tool,
             } => {
-                log::warn!(
+                warn!(
                     "this repository recommends nextest version {}, but the current version is {}",
-                    required.if_supports_color(Stream::Stderr, |x| x.bold()),
-                    current.if_supports_color(Stream::Stderr, |x| x.bold()),
+                    required.style(styles.bold),
+                    current.style(styles.bold),
                 );
                 if let Some(tool) = tool {
-                    log::info!(
+                    info!(
                         target: "cargo_nextest::no_heading",
                         "(recommended version specified by tool `{}`)",
                         tool,
@@ -1234,8 +1373,9 @@ impl BaseApp {
 
                 // Don't need to print extra text here -- this is a warning, not an error.
                 crate::helpers::log_needs_update(
-                    log::Level::Info,
+                    Level::INFO,
                     crate::helpers::BYPASS_VERSION_TEXT,
+                    &styles,
                 );
 
                 Ok(())
@@ -1251,13 +1391,13 @@ impl BaseApp {
     fn load_double_spawn(&self) -> &DoubleSpawnInfo {
         self.double_spawn.get_or_init(|| {
             if std::env::var("NEXTEST_EXPERIMENTAL_DOUBLE_SPAWN").is_ok() {
-                log::warn!(
+                warn!(
                     "double-spawn is no longer experimental: \
                      NEXTEST_EXPERIMENTAL_DOUBLE_SPAWN does not need to be set"
                 );
             }
             if std::env::var("NEXTEST_DOUBLE_SPAWN") == Ok("0".to_owned()) {
-                log::info!("NEXTEST_DOUBLE_SPAWN=0 set, disabling double-spawn for test processes");
+                info!("NEXTEST_DOUBLE_SPAWN=0 set, disabling double-spawn for test processes");
                 DoubleSpawnInfo::disabled()
             } else {
                 DoubleSpawnInfo::try_enable()
@@ -1266,13 +1406,17 @@ impl BaseApp {
     }
 
     fn load_runner(&self, build_platforms: &BuildPlatforms) -> &TargetRunner {
-        self.target_runner
-            .get_or_init(|| runner_for_target(&self.cargo_configs, build_platforms))
+        self.target_runner.get_or_init(|| {
+            runner_for_target(
+                &self.cargo_configs,
+                build_platforms,
+                &self.output.stderr_styles(),
+            )
+        })
     }
 
     fn exec_archive(
         &self,
-        profile_name: Option<&str>,
         output_file: &Utf8Path,
         format: ArchiveFormatOpt,
         zstd_level: i32,
@@ -1284,9 +1428,10 @@ impl BaseApp {
         let path_mapper = PathMapper::noop();
 
         let build_platforms = binary_list.rust_build_meta.build_platforms.clone();
-        let (_, config) = self.load_config()?;
+        let pcx = ParseContext::new(self.graph());
+        let (_, config) = self.load_config(&pcx)?;
         let profile = self
-            .load_profile(profile_name, &config)?
+            .load_profile(&config)?
             .apply_build_platforms(&build_platforms);
 
         let redactor = if should_redact() {
@@ -1351,12 +1496,8 @@ impl BaseApp {
         &self.package_graph
     }
 
-    fn load_profile<'cfg>(
-        &self,
-        profile_name: Option<&str>,
-        config: &'cfg NextestConfig,
-    ) -> Result<NextestProfile<'cfg, PreBuildPlatform>> {
-        let profile_name = profile_name.unwrap_or_else(|| {
+    fn load_profile<'cfg>(&self, config: &'cfg NextestConfig) -> Result<EarlyProfile<'cfg>> {
+        let profile_name = self.config_opts.profile.as_deref().unwrap_or_else(|| {
             // The "official" way to detect a miri environment is with MIRI_SYSROOT.
             // https://github.com/rust-lang/miri/pull/2398#issuecomment-1190747685
             if std::env::var_os("MIRI_SYSROOT").is_some() {
@@ -1403,7 +1544,9 @@ struct App {
 fn check_experimental_filtering(_output: OutputContext) {
     const EXPERIMENTAL_ENV: &str = "NEXTEST_EXPERIMENTAL_FILTER_EXPR";
     if std::env::var(EXPERIMENTAL_ENV).is_ok() {
-        log::warn!("filter expressions are no longer experimental: NEXTEST_EXPERIMENTAL_FILTER_EXPR does not need to be set");
+        warn!(
+            "filtersets are no longer experimental: NEXTEST_EXPERIMENTAL_FILTER_EXPR does not need to be set"
+        );
     }
 }
 
@@ -1414,12 +1557,12 @@ impl App {
         Ok(Self { base, build_filter })
     }
 
-    fn build_filtering_expressions(&self) -> Result<Vec<FilteringExpr>> {
+    fn build_filtering_expressions(&self, pcx: &ParseContext<'_>) -> Result<Vec<Filterset>> {
         let (exprs, all_errors): (Vec<_>, Vec<_>) = self
             .build_filter
-            .filter_expr
+            .filterset
             .iter()
-            .map(|input| FilteringExpr::parse(input.clone(), self.base.graph()))
+            .map(|input| Filterset::parse(input.clone(), pcx, FiltersetKind::Test))
             .partition_result();
 
         if !all_errors.is_empty() {
@@ -1434,6 +1577,7 @@ impl App {
         ctx: &TestExecuteContext<'_>,
         binary_list: Arc<BinaryList>,
         test_filter_builder: TestFilterBuilder,
+        ecx: &EvalContext<'_>,
     ) -> Result<TestList> {
         let env = EnvironmentMap::new(&self.base.cargo_configs);
         self.build_filter.compute_test_list(
@@ -1443,6 +1587,7 @@ impl App {
             binary_list,
             test_filter_builder,
             env,
+            ecx,
             &self.base.reuse_build,
         )
     }
@@ -1453,8 +1598,11 @@ impl App {
         list_type: ListType,
         output_writer: &mut OutputWriter,
     ) -> Result<()> {
-        let (version_only_config, _) = self.base.load_config()?;
-        let filter_exprs = self.build_filtering_expressions()?;
+        let pcx = ParseContext::new(self.base.graph());
+
+        let (version_only_config, config) = self.base.load_config(&pcx)?;
+        let profile = self.base.load_profile(&config)?;
+        let filter_exprs = self.build_filtering_expressions(&pcx)?;
         let test_filter_builder = self.build_filter.make_test_filter_builder(filter_exprs)?;
 
         let binary_list = self.base.build_binary_list()?;
@@ -1477,12 +1625,17 @@ impl App {
                 let target_runner = self
                     .base
                     .load_runner(&binary_list.rust_build_meta.build_platforms);
+                let profile =
+                    profile.apply_build_platforms(&binary_list.rust_build_meta.build_platforms);
                 let ctx = TestExecuteContext {
+                    profile_name: profile.name(),
                     double_spawn,
                     target_runner,
                 };
+                let ecx = profile.filterset_ecx();
 
-                let test_list = self.build_test_list(&ctx, binary_list, test_filter_builder)?;
+                let test_list =
+                    self.build_test_list(&ctx, binary_list, test_filter_builder, &ecx)?;
 
                 let mut writer = output_writer.stdout_writer();
                 test_list.write(
@@ -1504,13 +1657,13 @@ impl App {
 
     fn exec_show_test_groups(
         &self,
-        profile_name: Option<&str>,
         show_default: bool,
         groups: Vec<TestGroup>,
         output_writer: &mut OutputWriter,
     ) -> Result<()> {
-        let (_, config) = self.base.load_config()?;
-        let profile = self.base.load_profile(profile_name, &config)?;
+        let pcx = ParseContext::new(self.base.graph());
+        let (_, config) = self.base.load_config(&pcx)?;
+        let profile = self.base.load_profile(&config)?;
 
         // Validate test groups before doing any other work.
         let mode = if groups.is_empty() {
@@ -1521,7 +1674,7 @@ impl App {
         };
         let settings = ShowTestGroupSettings { mode, show_default };
 
-        let filter_exprs = self.build_filtering_expressions()?;
+        let filter_exprs = self.build_filtering_expressions(&pcx)?;
         let test_filter_builder = self.build_filter.make_test_filter_builder(filter_exprs)?;
 
         let binary_list = self.base.build_binary_list()?;
@@ -1529,14 +1682,15 @@ impl App {
 
         let double_spawn = self.base.load_double_spawn();
         let target_runner = self.base.load_runner(&build_platforms);
+        let profile = profile.apply_build_platforms(&build_platforms);
         let ctx = TestExecuteContext {
+            profile_name: profile.name(),
             double_spawn,
             target_runner,
         };
+        let ecx = profile.filterset_ecx();
 
-        let test_list = self.build_test_list(&ctx, binary_list, test_filter_builder)?;
-
-        let profile = profile.apply_build_platforms(&build_platforms);
+        let test_list = self.build_test_list(&ctx, binary_list, test_filter_builder, &ecx)?;
 
         let mut writer = output_writer.stdout_writer();
 
@@ -1557,15 +1711,15 @@ impl App {
 
     fn exec_run(
         &self,
-        profile_name: Option<&str>,
         no_capture: bool,
         runner_opts: &TestRunnerOpts,
-        reporter_opts: &TestReporterOpts,
+        reporter_opts: &ReporterOpts,
         cli_args: Vec<String>,
         output_writer: &mut OutputWriter,
-    ) -> Result<()> {
-        let (version_only_config, config) = self.base.load_config()?;
-        let profile = self.base.load_profile(profile_name, &config)?;
+    ) -> Result<i32> {
+        let pcx = ParseContext::new(self.base.graph());
+        let (version_only_config, config) = self.base.load_config(&pcx)?;
+        let profile = self.base.load_profile(&config)?;
 
         // Construct this here so that errors are reported before the build step.
         let mut structured_reporter = structured::StructuredReporter::new();
@@ -1603,42 +1757,46 @@ impl App {
             CaptureStrategy::Combined
         };
 
-        let filter_exprs = self.build_filtering_expressions()?;
+        let filter_exprs = self.build_filtering_expressions(&pcx)?;
         let test_filter_builder = self.build_filter.make_test_filter_builder(filter_exprs)?;
 
         let binary_list = self.base.build_binary_list()?;
         let build_platforms = &binary_list.rust_build_meta.build_platforms.clone();
         let double_spawn = self.base.load_double_spawn();
         let target_runner = self.base.load_runner(build_platforms);
+
+        let profile = profile.apply_build_platforms(build_platforms);
         let ctx = TestExecuteContext {
+            profile_name: profile.name(),
             double_spawn,
             target_runner,
         };
+        let ecx = profile.filterset_ecx();
 
-        let test_list = self.build_test_list(&ctx, binary_list, test_filter_builder)?;
+        let test_list = self.build_test_list(&ctx, binary_list, test_filter_builder, &ecx)?;
 
         let output = output_writer.reporter_output();
-        let profile = profile.apply_build_platforms(build_platforms);
-
-        let mut reporter = reporter_opts
-            .to_builder(no_capture)
-            .set_verbose(self.base.output.verbose)
-            .build(&test_list, &profile, output, structured_reporter);
-        if self
+        let should_colorize = self
             .base
             .output
             .color
-            .should_colorize(supports_color::Stream::Stderr)
-        {
-            reporter.colorize();
-        }
+            .should_colorize(supports_color::Stream::Stderr);
 
-        let handler = SignalHandlerKind::Standard;
+        let signal_handler = SignalHandlerKind::Standard;
+        let input_handler = if reporter_opts.no_input_handler {
+            InputHandlerKind::Noop
+        } else {
+            // This means that the input handler determines whether it should be
+            // enabled.
+            InputHandlerKind::Standard
+        };
+
+        // Make the runner.
         let runner_builder = match runner_opts.to_builder(cap_strat) {
             Some(runner_builder) => runner_builder,
             None => {
                 // This means --no-run was passed in. Exit.
-                return Ok(());
+                return Ok(0);
             }
         };
 
@@ -1646,35 +1804,47 @@ impl App {
             &test_list,
             &profile,
             cli_args,
-            handler,
+            signal_handler,
+            input_handler,
             double_spawn.clone(),
             target_runner.clone(),
         )?;
+
+        // Make the reporter.
+        let mut reporter = reporter_opts
+            .to_builder(no_capture, should_colorize)
+            .set_verbose(self.base.output.verbose)
+            .build(&test_list, &profile, output, structured_reporter);
 
         configure_handle_inheritance(no_capture)?;
         let run_stats = runner.try_execute(|event| {
             // Write and flush the event.
             reporter.report_event(event)
         })?;
+        reporter.finish();
         self.base
             .check_version_config_final(version_only_config.nextest_version())?;
-        if !run_stats.is_success() {
-            match run_stats.failure_kind() {
-                Some(RunStatsFailureKind::SetupScript) => {
-                    return Err(ExpectedError::setup_script_failed());
+
+        match run_stats.summarize_final() {
+            FinalRunStats::Success => Ok(0),
+            FinalRunStats::NoTestsRun => match runner_opts.no_tests {
+                Some(NoTestsBehavior::Pass) => Ok(0),
+                Some(NoTestsBehavior::Warn) => {
+                    warn!("no tests to run");
+                    Ok(0)
                 }
-                Some(RunStatsFailureKind::Test) => {
-                    return Err(ExpectedError::test_run_failed());
-                }
-                None => {
-                    // XXX This means that the final number run of tests was less than the initial
-                    // number. Why can this be except if tests were failed or canceled for some
-                    // reason?
-                    return Err(ExpectedError::test_run_failed());
-                }
+                Some(NoTestsBehavior::Fail) => Err(ExpectedError::NoTestsRun { is_default: false }),
+                None => Err(ExpectedError::NoTestsRun { is_default: true }),
+            },
+            FinalRunStats::Cancelled(RunStatsFailureKind::SetupScript)
+            | FinalRunStats::Failed(RunStatsFailureKind::SetupScript) => {
+                Err(ExpectedError::setup_script_failed())
+            }
+            FinalRunStats::Cancelled(RunStatsFailureKind::Test { .. })
+            | FinalRunStats::Failed(RunStatsFailureKind::Test { .. }) => {
+                Err(ExpectedError::test_run_failed())
             }
         }
-        Ok(())
     }
 }
 
@@ -1684,10 +1854,6 @@ enum ShowConfigCommand {
     Version {},
     /// Show defined test groups and their associated tests.
     TestGroups {
-        /// Nextest profile to show test groups for
-        #[arg(long, short = 'P', env = "NEXTEST_PROFILE")]
-        profile: Option<String>,
-
         /// Show default test groups
         #[arg(long)]
         show_default: bool,
@@ -1711,11 +1877,10 @@ impl ShowConfigCommand {
     fn exec(
         self,
         manifest_path: Option<Utf8PathBuf>,
-        output: OutputOpts,
         config_opts: ConfigOpts,
+        output: OutputContext,
         output_writer: &mut OutputWriter,
     ) -> Result<i32> {
-        let output = output.init();
         match self {
             Self::Version {} => {
                 let mut cargo_cli =
@@ -1767,15 +1932,17 @@ impl ShowConfigCommand {
                     NextestVersionEval::Satisfied => Ok(0),
                     NextestVersionEval::Error { .. } => {
                         crate::helpers::log_needs_update(
-                            log::Level::Error,
+                            Level::ERROR,
                             crate::helpers::BYPASS_VERSION_TEXT,
+                            &output.stderr_styles(),
                         );
                         Ok(nextest_metadata::NextestExitCode::REQUIRED_VERSION_NOT_MET)
                     }
                     NextestVersionEval::Warn { .. } => {
                         crate::helpers::log_needs_update(
-                            log::Level::Warn,
+                            Level::WARN,
                             crate::helpers::BYPASS_VERSION_TEXT,
+                            &output.stderr_styles(),
                         );
                         Ok(nextest_metadata::NextestExitCode::RECOMMENDED_VERSION_NOT_MET)
                     }
@@ -1784,7 +1951,6 @@ impl ShowConfigCommand {
                 }
             }
             Self::TestGroups {
-                profile,
                 show_default,
                 groups,
                 cargo_options,
@@ -1801,7 +1967,7 @@ impl ShowConfigCommand {
                 )?;
                 let app = App::new(base, build_filter)?;
 
-                app.exec_show_test_groups(profile.as_deref(), show_default, groups, output_writer)?;
+                app.exec_show_test_groups(show_default, groups, output_writer)?;
 
                 Ok(0)
             }
@@ -1866,7 +2032,7 @@ enum SetupSource {
 }
 
 impl SelfCommand {
-    #[allow(unused_variables)]
+    #[cfg_attr(not(feature = "self-update"), expect(unused_variables))]
     fn exec(self, output: OutputOpts) -> Result<i32> {
         let output = output.init();
 
@@ -1893,7 +2059,7 @@ impl SelfCommand {
                             output,
                         )
                     } else {
-                        log::info!("this version of cargo-nextest cannot perform self-updates\n\
+                        info!("this version of cargo-nextest cannot perform self-updates\n\
                                     (hint: this usually means nextest was installed by a package manager)");
                         Ok(nextest_metadata::NextestExitCode::SELF_UPDATE_UNAVAILABLE)
                     }
@@ -1901,6 +2067,225 @@ impl SelfCommand {
             }
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+enum DebugCommand {
+    /// Show the data that nextest would extract from standard output or standard error.
+    ///
+    /// Text extraction is a heuristic process driven by a bunch of regexes and other similar logic.
+    /// This command shows what nextest would extract from a given input.
+    Extract {
+        /// The path to the standard output produced by the test process.
+        #[arg(long, required_unless_present_any = ["stderr", "combined"])]
+        stdout: Option<Utf8PathBuf>,
+
+        /// The path to the standard error produced by the test process.
+        #[arg(long, required_unless_present_any = ["stdout", "combined"])]
+        stderr: Option<Utf8PathBuf>,
+
+        /// The combined output produced by the test process.
+        #[arg(long, conflicts_with_all = ["stdout", "stderr"])]
+        combined: Option<Utf8PathBuf>,
+
+        /// The kind of output to produce.
+        #[arg(value_enum)]
+        output_format: ExtractOutputFormat,
+    },
+
+    /// Print the current executable path.
+    CurrentExe,
+
+    /// Show the build platforms that nextest would use.
+    BuildPlatforms {
+        /// The target triple to use.
+        #[arg(long)]
+        target: Option<String>,
+
+        /// Override a Cargo configuration value.
+        #[arg(long, value_name = "KEY=VALUE")]
+        config: Vec<String>,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value_t)]
+        output_format: BuildPlatformsOutputFormat,
+    },
+}
+
+impl DebugCommand {
+    fn exec(self, output: OutputOpts) -> Result<i32> {
+        let _ = output.init();
+
+        match self {
+            DebugCommand::Extract {
+                stdout,
+                stderr,
+                combined,
+                output_format,
+            } => {
+                // Either stdout + stderr or combined must be present.
+                if let Some(combined) = combined {
+                    let combined = std::fs::read(&combined).map_err(|err| {
+                        ExpectedError::DebugExtractReadError {
+                            kind: "combined",
+                            path: combined,
+                            err,
+                        }
+                    })?;
+
+                    let description_kind = extract_slice_from_output(&combined, &combined);
+                    display_output_slice(description_kind, output_format)?;
+                } else {
+                    let stdout = stdout
+                        .map(|path| {
+                            std::fs::read(&path).map_err(|err| {
+                                ExpectedError::DebugExtractReadError {
+                                    kind: "stdout",
+                                    path,
+                                    err,
+                                }
+                            })
+                        })
+                        .transpose()?
+                        .unwrap_or_default();
+                    let stderr = stderr
+                        .map(|path| {
+                            std::fs::read(&path).map_err(|err| {
+                                ExpectedError::DebugExtractReadError {
+                                    kind: "stderr",
+                                    path,
+                                    err,
+                                }
+                            })
+                        })
+                        .transpose()?
+                        .unwrap_or_default();
+
+                    let output_slice = extract_slice_from_output(&stdout, &stderr);
+                    display_output_slice(output_slice, output_format)?;
+                }
+            }
+            DebugCommand::CurrentExe => {
+                let exe = std::env::current_exe()
+                    .map_err(|err| ExpectedError::GetCurrentExeFailed { err })?;
+                println!("{}", exe.display());
+            }
+            DebugCommand::BuildPlatforms {
+                target,
+                config,
+                output_format,
+            } => {
+                let cargo_configs = CargoConfigs::new(&config).map_err(Box::new)?;
+                let build_platforms = detect_build_platforms(&cargo_configs, target.as_deref())?;
+                match output_format {
+                    BuildPlatformsOutputFormat::Debug => {
+                        println!("{:#?}", build_platforms);
+                    }
+                    BuildPlatformsOutputFormat::Triple => {
+                        println!(
+                            "host triple: {}",
+                            build_platforms.host.platform.triple().as_str()
+                        );
+                        if let Some(target) = &build_platforms.target {
+                            println!(
+                                "target triple: {}",
+                                target.triple.platform.triple().as_str()
+                            );
+                        } else {
+                            println!("target triple: (none)");
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(0)
+    }
+}
+
+fn extract_slice_from_output<'a>(
+    stdout: &'a [u8],
+    stderr: &'a [u8],
+) -> Option<TestOutputErrorSlice<'a>> {
+    TestOutputErrorSlice::heuristic_extract(Some(stdout), Some(stderr))
+}
+
+fn display_output_slice(
+    output_slice: Option<TestOutputErrorSlice<'_>>,
+    output_format: ExtractOutputFormat,
+) -> Result<()> {
+    match output_format {
+        ExtractOutputFormat::Raw => {
+            if let Some(kind) = output_slice {
+                if let Some(out) = kind.combined_subslice() {
+                    return std::io::stdout().write_all(out.slice).map_err(|err| {
+                        ExpectedError::DebugExtractWriteError {
+                            format: output_format,
+                            err,
+                        }
+                    });
+                }
+            }
+        }
+        ExtractOutputFormat::JunitDescription => {
+            if let Some(kind) = output_slice {
+                println!("{}", XmlString::new(kind.to_string()).as_str());
+            }
+        }
+        ExtractOutputFormat::Highlight => {
+            if let Some(kind) = output_slice {
+                if let Some(out) = kind.combined_subslice() {
+                    let end = highlight_end(out.slice);
+                    return std::io::stdout()
+                        .write_all(&out.slice[..end])
+                        .map_err(|err| ExpectedError::DebugExtractWriteError {
+                            format: output_format,
+                            err,
+                        });
+                }
+            }
+        }
+    }
+
+    eprintln!("(no description found)");
+    Ok(())
+}
+
+/// Output format for `nextest debug extract`.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ExtractOutputFormat {
+    /// Show the raw text extracted.
+    Raw,
+
+    /// Show what would be put in the description field of JUnit reports.
+    ///
+    /// This is similar to `Raw`, but is valid Unicode, and strips out ANSI escape codes and other
+    /// invalid XML characters.
+    JunitDescription,
+
+    /// Show what would be highlighted in nextest's output.
+    Highlight,
+}
+
+impl fmt::Display for ExtractOutputFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Raw => write!(f, "raw"),
+            Self::JunitDescription => write!(f, "junit-description"),
+            Self::Highlight => write!(f, "highlight"),
+        }
+    }
+}
+
+/// Output format for `nextest debug build-platforms`.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum BuildPlatformsOutputFormat {
+    /// Show Debug output.
+    #[default]
+    Debug,
+
+    /// Show just the triple.
+    Triple,
 }
 
 fn acquire_graph_data(
@@ -1944,85 +2329,89 @@ fn acquire_graph_data(
     Ok(json)
 }
 
+fn detect_build_platforms(
+    cargo_configs: &CargoConfigs,
+    target_cli_option: Option<&str>,
+) -> Result<BuildPlatforms, ExpectedError> {
+    let host = HostPlatform::detect(PlatformLibdir::from_rustc_stdout(
+        RustcCli::print_host_libdir().read(),
+    ))?;
+    let triple_info = discover_target_triple(cargo_configs, target_cli_option)?;
+    let target = triple_info.map(|triple| {
+        let libdir =
+            PlatformLibdir::from_rustc_stdout(RustcCli::print_target_libdir(&triple).read());
+        TargetPlatform::new(triple, libdir)
+    });
+    Ok(BuildPlatforms { host, target })
+}
+
 fn discover_target_triple(
     cargo_configs: &CargoConfigs,
     target_cli_option: Option<&str>,
-) -> Option<TargetTriple> {
-    match TargetTriple::find(cargo_configs, target_cli_option) {
-        Ok(Some(triple)) => {
-            log::debug!(
+) -> Result<Option<TargetTriple>, TargetTripleError> {
+    TargetTriple::find(cargo_configs, target_cli_option).inspect(|v| {
+        if let Some(triple) = v {
+            debug!(
                 "using target triple `{}` defined by `{}`; {}",
                 triple.platform.triple_str(),
                 triple.source,
                 triple.location,
             );
-            Some(triple)
+        } else {
+            debug!("no target triple found, assuming no cross-compilation");
         }
-        Ok(None) => {
-            log::debug!("no target triple found, assuming no cross-compilation");
-
-            None
-        }
-        Err(err) => {
-            warn_on_err("target triple", &err);
-            None
-        }
-    }
+    })
 }
 
 fn runner_for_target(
     cargo_configs: &CargoConfigs,
     build_platforms: &BuildPlatforms,
+    styles: &StderrStyles,
 ) -> TargetRunner {
     match TargetRunner::new(cargo_configs, build_platforms) {
         Ok(runner) => {
             if build_platforms.target.is_some() {
                 if let Some(runner) = runner.target() {
-                    log_platform_runner("for the target platform, ", runner);
+                    log_platform_runner("for the target platform, ", runner, styles);
                 }
                 if let Some(runner) = runner.host() {
-                    log_platform_runner("for the host platform, ", runner);
+                    log_platform_runner("for the host platform, ", runner, styles);
                 }
             } else {
                 // If triple is None, then the host and target platforms use the same runner if
                 // any.
                 if let Some(runner) = runner.target() {
-                    log_platform_runner("", runner);
+                    log_platform_runner("", runner, styles);
                 }
             }
             runner
         }
         Err(err) => {
-            warn_on_err("target runner", &err);
+            warn_on_err("target runner", &err, styles);
             TargetRunner::empty()
         }
     }
 }
 
-fn log_platform_runner(prefix: &str, runner: &PlatformRunner) {
+fn log_platform_runner(prefix: &str, runner: &PlatformRunner, styles: &StderrStyles) {
     let runner_command = shell_words::join(std::iter::once(runner.binary()).chain(runner.args()));
-    log::info!(
+    info!(
         "{prefix}using target runner `{}` defined by {}",
-        runner_command.if_supports_color(Stream::Stderr, |s| s.bold()),
+        runner_command.style(styles.bold),
         runner.source()
     )
 }
 
-fn warn_on_err(thing: &str, err: &(dyn std::error::Error)) {
+fn warn_on_err(thing: &str, err: &(dyn std::error::Error), styles: &StderrStyles) {
     let mut s = String::with_capacity(256);
     swrite!(s, "could not determine {thing}: {err}");
     let mut next_error = err.source();
     while let Some(err) = next_error {
-        swrite!(
-            s,
-            "\n  {} {}",
-            "caused by:".if_supports_color(Stream::Stderr, |s| s.style(Style::new().yellow())),
-            err
-        );
+        swrite!(s, "\n  {} {}", "caused by:".style(styles.warning_text), err);
         next_error = err.source();
     }
 
-    log::warn!("{}", s);
+    warn!("{}", s);
 }
 
 #[cfg(test)]
@@ -2052,6 +2441,8 @@ mod tests {
             "cargo nextest run --nocapture",
             "cargo nextest run --no-run",
             "cargo nextest run --final-status-level flaky",
+            "cargo nextest run --max-fail 3",
+            "cargo nextest run --max-fail=all",
             // retry is an alias for flaky -- ensure that it parses
             "cargo nextest run --final-status-level retry",
             "NEXTEST_HIDE_PROGRESS_BAR=1 cargo nextest run",
@@ -2079,10 +2470,12 @@ mod tests {
             "cargo nextest list --archive-file my-archive.tar.zst --workspace-remap foo",
             "cargo nextest list --archive-file my-archive.tar.zst --config target.'cfg(all())'.runner=\"my-runner\"",
             // ---
-            // Filter expressions
+            // Filtersets
             // ---
             "cargo nextest list -E deps(foo)",
+            "cargo nextest run --filterset 'test(bar)' --package=my-package test-filter",
             "cargo nextest run --filter-expr 'test(bar)' --package=my-package test-filter",
+            "cargo nextest list -E 'deps(foo)' --ignore-default-filter",
             // ---
             // Test binary arguments
             // ---
@@ -2090,6 +2483,9 @@ mod tests {
             // Test negative test threads
             "cargo nextest run --jobs -3",
             "cargo nextest run --jobs 3",
+            // Test negative cargo build jobs
+            "cargo nextest run --build-jobs -1",
+            "cargo nextest run --build-jobs 1",
         ];
 
         let invalid: &[(&'static str, ErrorKind)] = &[
@@ -2118,6 +2514,7 @@ mod tests {
                 "cargo nextest run --no-run --no-fail-fast",
                 ArgumentConflict,
             ),
+            ("cargo nextest run --no-run --max-fail=3", ArgumentConflict),
             (
                 "cargo nextest run --no-run --failure-output immediate",
                 ArgumentConflict,
@@ -2132,6 +2529,13 @@ mod tests {
             ),
             (
                 "cargo nextest run --no-run --final-status-level skip",
+                ArgumentConflict,
+            ),
+            // ---
+            // --max-fail and these options conflict
+            // ---
+            (
+                "cargo nextest run --max-fail=3 --no-fail-fast",
                 ArgumentConflict,
             ),
             // ---
@@ -2206,6 +2610,9 @@ mod tests {
             ),
             // Invalid test threads: 0
             ("cargo nextest run --jobs 0", ValueValidation),
+            // Test threads must be a number
+            ("cargo nextest run --jobs -twenty", UnknownArgument),
+            ("cargo nextest run --build-jobs -inf1", UnknownArgument),
         ];
 
         // Unset all NEXTEST_ env vars because they can conflict with the try_parse_from below.
@@ -2286,6 +2693,7 @@ mod tests {
             // ---
             // ignored
             // ---
+            ("foo -- --ignored", "foo --run-ignored only"),
             ("foo -- --ignored", "foo --run-ignored ignored-only"),
             ("foo -- --include-ignored", "foo --run-ignored all"),
             // ---
@@ -2297,23 +2705,58 @@ mod tests {
             ),
             ("foo -- -- str1 str2 --", "foo str1 str2 -- -- --"),
         ];
+        let skip_exact = &[
+            // ---
+            // skip
+            // ---
+            ("foo -- --skip my-pattern --skip your-pattern", {
+                let mut patterns = TestFilterPatterns::default();
+                patterns.add_skip_pattern("my-pattern".to_owned());
+                patterns.add_skip_pattern("your-pattern".to_owned());
+                patterns
+            }),
+            ("foo -- pattern1 --skip my-pattern --skip your-pattern", {
+                let mut patterns = TestFilterPatterns::default();
+                patterns.add_substring_pattern("pattern1".to_owned());
+                patterns.add_skip_pattern("my-pattern".to_owned());
+                patterns.add_skip_pattern("your-pattern".to_owned());
+                patterns
+            }),
+            // ---
+            // skip and exact
+            // ---
+            (
+                "foo -- --skip my-pattern --skip your-pattern exact1 --exact pattern2",
+                {
+                    let mut patterns = TestFilterPatterns::default();
+                    patterns.add_skip_exact_pattern("my-pattern".to_owned());
+                    patterns.add_skip_exact_pattern("your-pattern".to_owned());
+                    patterns.add_exact_pattern("exact1".to_owned());
+                    patterns.add_exact_pattern("pattern2".to_owned());
+                    patterns
+                },
+            ),
+        ];
         let invalid = &[
             // ---
             // duplicated
             // ---
             ("foo -- --include-ignored --include-ignored", "duplicated"),
             ("foo -- --ignored --ignored", "duplicated"),
+            ("foo -- --exact --exact", "duplicated"),
             // ---
             // mutually exclusive
             // ---
             ("foo -- --ignored --include-ignored", "mutually exclusive"),
             ("foo --run-ignored all -- --ignored", "mutually exclusive"),
             // ---
+            // missing required argument
+            // ---
+            ("foo -- --skip", "missing required argument"),
+            // ---
             // unsupported
             // ---
             ("foo -- --bar", "unsupported"),
-            ("foo -- --exact", "unsupported\n(hint: use a filter expression instead: <https://nexte.st/book/filter-expressions>)"),
-            ("foo -- --skip", "unsupported\n(hint: use a filter expression instead: <https://nexte.st/book/filter-expressions>)"),
         ];
 
         for (a, b) in valid {
@@ -2326,6 +2769,17 @@ mod tests {
                 get_test_filter_builder(b).unwrap_or_else(|_| panic!("failed to parse {b}"))
             );
             assert_eq!(a_str, b_str);
+        }
+
+        for (args, patterns) in skip_exact {
+            let builder =
+                get_test_filter_builder(args).unwrap_or_else(|_| panic!("failed to parse {args}"));
+
+            let builder2 =
+                TestFilterBuilder::new(RunIgnored::Default, None, patterns.clone(), Vec::new())
+                    .unwrap_or_else(|_| panic!("failed to build TestFilterBuilder"));
+
+            assert_eq!(builder, builder2, "{args} matches expected");
         }
 
         for (s, r) in invalid {

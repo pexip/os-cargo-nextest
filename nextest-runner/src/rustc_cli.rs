@@ -4,6 +4,7 @@
 use crate::cargo_config::TargetTriple;
 use camino::Utf8PathBuf;
 use std::{borrow::Cow, path::PathBuf};
+use tracing::{debug, trace};
 
 /// Create a rustc CLI call.
 #[derive(Clone, Debug)]
@@ -13,6 +14,13 @@ pub struct RustcCli<'a> {
 }
 
 impl<'a> RustcCli<'a> {
+    /// Create a rustc CLI call: `rustc --version --verbose`.
+    pub fn version_verbose() -> Self {
+        let mut cli = Self::default();
+        cli.add_arg("--version").add_arg("--verbose");
+        cli
+    }
+
     /// Create a rustc CLI call: `rustc --print target-libdir`.
     pub fn print_host_libdir() -> Self {
         let mut cli = Self::default();
@@ -35,7 +43,8 @@ impl<'a> RustcCli<'a> {
         self
     }
 
-    fn to_expression(&self) -> duct::Expression {
+    /// Convert the command to a [`duct::Expression`].
+    pub fn to_expression(&self) -> duct::Expression {
         duct::cmd(
             self.rustc_path.as_str(),
             self.args.iter().map(|arg| arg.as_ref()),
@@ -46,7 +55,7 @@ impl<'a> RustcCli<'a> {
     /// [`Vec<u8>`].
     pub fn read(&self) -> Option<Vec<u8>> {
         let expression = self.to_expression();
-        log::trace!("Executing command: {:?}", expression);
+        trace!("Executing command: {:?}", expression);
         let output = match expression
             .stdout_capture()
             .stderr_capture()
@@ -55,23 +64,23 @@ impl<'a> RustcCli<'a> {
         {
             Ok(output) => output,
             Err(e) => {
-                log::debug!("Failed to spawn the child process: {}", e);
+                debug!("Failed to spawn the child process: {}", e);
                 return None;
             }
         };
         if !output.status.success() {
-            log::debug!("execution failed with {}", output.status);
-            log::debug!("stdout:");
-            log::debug!("{}", String::from_utf8_lossy(&output.stdout));
-            log::debug!("stderr:");
-            log::debug!("{}", String::from_utf8_lossy(&output.stderr));
+            debug!("execution failed with {}", output.status);
+            debug!("stdout:");
+            debug!("{}", String::from_utf8_lossy(&output.stdout));
+            debug!("stderr:");
+            debug!("{}", String::from_utf8_lossy(&output.stderr));
             return None;
         }
         Some(output.stdout)
     }
 }
 
-impl<'a> Default for RustcCli<'a> {
+impl Default for RustcCli<'_> {
     fn default() -> Self {
         Self {
             rustc_path: rustc_path(),
@@ -103,8 +112,7 @@ mod tests {
         let output = String::from_utf8(output).expect("the output should be valid utf-8");
         assert!(
             output.starts_with("rustc"),
-            "The output should start with rustc, but the actual output is: {}",
-            output
+            "The output should start with rustc, but the actual output is: {output}"
         );
     }
 
@@ -117,8 +125,7 @@ mod tests {
         let output = String::from_utf8(output).expect("the output should be valid utf-8");
         assert!(
             output.starts_with("cargo"),
-            "The output should start with cargo, but the actual output is: {}",
-            output
+            "The output should start with cargo, but the actual output is: {output}"
         );
     }
 

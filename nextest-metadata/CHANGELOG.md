@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.12.2] - 2025-02-24
+
+### Added
+
+`RustTestBinaryKind::EXAMPLE` is the string `"example"`.
+
+### Changed
+
+MSRV updated to Rust 1.78.
+
+## [0.12.1] - 2024-09-05
+
+Internal dependency updates.
+
+## [0.12.0] - 2024-08-28
+
+### Changed
+
+- Renamed references from "default-set" to "default-filter" to match cargo-nextest changes.
+
+### Removed
+
+- `NextestExitCode::INVALID_FILTER_EXPRESSION` has been renamed to `INVALID_FILTERSET`.
+
+## [0.11.3] - 2024-08-25
+
+### Changed
+
+- `NextestExitCode::INVALID_FILTER_EXPRESSION` has been renamed to
+  `NextestExitCode::INVALID_FILTERSET`. The old name is kept around as a deprecated alias -- it will
+  be removed in the next major version.
+
+## [0.11.2] - 2024-08-23
+
+### Added
+
+- New exit code `NO_TESTS_RUN = 4`, indicating no tests to run.
+- Support for a new mismatch reason for tests and binaries: that they are not in the default set.
+
+## [0.11.1] - 2024-08-23
+
+This version was not published due to a CI issue.
+
 ## [0.11.0] - 2024-05-23
 
 ### Added
@@ -210,6 +253,12 @@ This release is compatible with cargo-nextest 0.9.10 and later.
 
 - Initial version, with support for listing tests.
 
+[0.12.2]: https://github.com/nextest-rs/nextest/releases/tag/nextest-metadata-0.12.2
+[0.12.1]: https://github.com/nextest-rs/nextest/releases/tag/nextest-metadata-0.12.1
+[0.12.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-metadata-0.12.0
+[0.11.3]: https://github.com/nextest-rs/nextest/releases/tag/nextest-metadata-0.11.3
+[0.11.2]: https://github.com/nextest-rs/nextest/releases/tag/nextest-metadata-0.11.2
+[0.11.1]: https://github.com/nextest-rs/nextest/releases/tag/nextest-metadata-0.11.1
 [0.11.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-metadata-0.11.0
 [0.10.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-metadata-0.10.0
 [0.9.3]: https://github.com/nextest-rs/nextest/releases/tag/nextest-metadata-0.9.3

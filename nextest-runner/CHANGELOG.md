@@ -1,5 +1,97 @@
 # Changelog
 
+## [0.75.0] - 2025-02-13
+
+See the changelog for [cargo-nextest 0.9.92](https://nexte.st/changelog#0.9.92).
+
+## [0.74.0] - 2025-02-13
+
+See the changelog for [cargo-nextest 0.9.91](https://nexte.st/changelog#0.9.91).
+
+## [0.73.0] - 2025-02-12
+
+See the changelog for [cargo-nextest 0.9.90](https://nexte.st/changelog#0.9.90).
+
+## [0.72.0] - 2025-02-10
+
+See the changelog for [cargo-nextest 0.9.89](https://nexte.st/changelog#0.9.89).
+
+## [0.71.0] - 2025-01-15
+
+See the changelog for [cargo-nextest 0.9.88](https://nexte.st/changelog#0.9.88).
+
+## [0.70.0] - 2024-12-17
+
+See the changelog for [cargo-nextest 0.9.87](https://nexte.st/changelog#0.9.87).
+
+## [0.69.0] - 2024-12-12
+
+See the changelog for [cargo-nextest 0.9.86](https://nexte.st/changelog#0.9.86).
+
+## [0.69.0-b.4] - 2024-12-11
+
+See the changelog for [cargo-nextest 0.9.86-b.4](https://nexte.st/changelog#0.9.86-b.4).
+
+## [0.69.0-b.3] - 2024-12-09
+
+See the changelog for [cargo-nextest 0.9.86-b.3](https://nexte.st/changelog#0.9.86-b.3).
+
+## [0.69.0-b.2] - 2024-12-06
+
+See the changelog for [cargo-nextest 0.9.86-b.2](https://nexte.st/changelog#0.9.86-b.2).
+
+## [0.69.0-b.1] - 2024-11-15
+
+See the changelog for [cargo-nextest 0.9.86-b.1](https://nexte.st/changelog#0.9.86-b.1).
+
+## [0.68.0] - 2024-11-15
+
+See the changelog for [cargo-nextest 0.9.85](https://nexte.st/changelog#0.9.85).
+
+## [0.67.0] - 2024-11-15
+
+See the changelog for [cargo-nextest 0.9.84](https://nexte.st/changelog#0.9.84).
+
+## [0.66.0] - 2024-11-15
+
+See the changelog for [cargo-nextest 0.9.83](https://nexte.st/changelog#0.9.83).
+
+## [0.65.0] - 2024-10-28
+
+See the changelog for [cargo-nextest 0.9.82](https://nexte.st/changelog#0.9.82).
+
+## [0.64.0] - 2024-10-02
+
+See the changelog for [cargo-nextest 0.9.81](https://nexte.st/changelog#0.9.81).
+
+## [0.63.0] - 2024-10-02
+
+See the changelog for [cargo-nextest 0.9.80](https://nexte.st/changelog#0.9.80).
+
+## [0.62.0] - 2024-10-02
+
+See the changelog for [cargo-nextest 0.9.79](https://nexte.st/changelog#0.9.79).
+
+## [0.61.0] - 2024-09-05
+
+See the changelog for [cargo-nextest 0.9.78](https://nexte.st/changelog#0.9.78).
+
+## [0.60.0] - 2024-08-28
+
+See the changelog for [cargo-nextest 0.9.77](https://nexte.st/changelog#0.9.77).
+
+## [0.59.0] - 2024-08-25
+
+See the changelog for [cargo-nextest 0.9.76](https://nexte.st/changelog#0.9.76).
+
+## [0.58.0] - 2024-08-23
+
+See the changelog for [cargo-nextest 0.9.75](https://nexte.st/CHANGELOG.html#0.9.75).
+
+## [0.57.0] - 2024-08-18
+
+See the changelog for [cargo-nextest 0.9.74](https://nexte.st/CHANGELOG.html#0.9.74).
+
 ## [0.56.1] - 2024-05-23
 
 See the changelog for [cargo-nextest 0.9.72](https://nexte.st/CHANGELOG.html#0972---2024-05-23).
@@ -450,6 +542,29 @@ Thanks to [Guiguiprim](https://github.com/Guiguiprim) for their contributions to
 
 - Initial version.
 
+[0.75.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.75.0
+[0.74.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.74.0
+[0.73.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.73.0
+[0.72.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.72.0
+[0.71.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.71.0
+[0.70.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.70.0
+[0.69.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.69-0
+[0.69.0-b.4]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.69-0.b.4
+[0.69.0-b.3]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.69-0.b.3
+[0.69.0-b.2]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.69-0.b.2
+[0.69.0-b.1]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.69-0.b.1
+[0.68.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.68.0
+[0.67.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.67.0
+[0.66.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.66.0
+[0.65.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.65.0
+[0.64.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.64.0
+[0.63.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.63.0
+[0.62.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.62.0
+[0.61.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.61.0
+[0.60.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.60.0
+[0.59.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.59.0
+[0.58.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.58.0
+[0.57.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.57.0
 [0.56.1]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.56.1
 [0.56.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.56.0
 [0.55.0]: https://github.com/nextest-rs/nextest/releases/tag/nextest-runner-0.55.0

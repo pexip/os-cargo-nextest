@@ -9,7 +9,7 @@ use crate::{
     write_str::WriteStr,
 };
 use camino::{Utf8Path, Utf8PathBuf};
-use cargo_metadata::{Artifact, BuildScript, Message, PackageId};
+use cargo_metadata::{Artifact, BuildScript, Message, PackageId, TargetKind};
 use guppy::graph::PackageGraph;
 use nextest_metadata::{
     BinaryListSummary, BuildPlatform, RustBinaryId, RustNonTestBinaryKind,
@@ -17,6 +17,7 @@ use nextest_metadata::{
 };
 use owo_colors::OwoColorize;
 use std::{collections::HashSet, io};
+use tracing::warn;
 
 /// A Rust test binary built by Cargo.
 #[derive(Clone, Debug)]
@@ -161,16 +162,22 @@ struct BinaryListBuildState<'g> {
     graph: &'g PackageGraph,
     rust_binaries: Vec<RustTestBinary>,
     rust_build_meta: RustBuildMeta<BinaryListState>,
+    alt_target_dir: Option<Utf8PathBuf>,
 }
 
 impl<'g> BinaryListBuildState<'g> {
     fn new(graph: &'g PackageGraph, build_platforms: BuildPlatforms) -> Self {
         let rust_target_dir = graph.workspace().target_directory().to_path_buf();
+        // For testing only, not part of the public API.
+        let alt_target_dir = std::env::var("__NEXTEST_ALT_TARGET_DIR")
+            .ok()
+            .map(Utf8PathBuf::from);
 
         Self {
             graph,
             rust_binaries: vec![],
             rust_build_meta: RustBuildMeta::new(rust_target_dir, build_platforms),
+            alt_target_dir,
         }
     }
 
@@ -216,10 +223,17 @@ impl<'g> BinaryListBuildState<'g> {
 
                 let (computed_kind, platform) = if kind.iter().any(|k| {
                     // https://doc.rust-lang.org/nightly/cargo/reference/cargo-targets.html#the-crate-type-field
-                    k == "lib" || k == "rlib" || k == "dylib" || k == "cdylib" || k == "staticlib"
+                    matches!(
+                        k,
+                        TargetKind::Lib
+                            | TargetKind::RLib
+                            | TargetKind::DyLib
+                            | TargetKind::CDyLib
+                            | TargetKind::StaticLib
+                    )
                 }) {
                     (RustTestBinaryKind::LIB, BuildPlatform::Target)
-                } else if kind.first().map(String::as_str) == Some("proc-macro") {
+                } else if let Some(TargetKind::ProcMacro) = kind.first() {
                     (RustTestBinaryKind::PROC_MACRO, BuildPlatform::Host)
                 } else {
                     // Non-lib kinds should always have just one element. Grab the first one.
@@ -227,7 +241,8 @@ impl<'g> BinaryListBuildState<'g> {
                         RustTestBinaryKind::new(
                             kind.into_iter()
                                 .next()
-                                .expect("already checked that kind is non-empty"),
+                                .expect("already checked that kind is non-empty")
+                                .to_string(),
                         ),
                         BuildPlatform::Target,
                     )
@@ -244,7 +259,12 @@ impl<'g> BinaryListBuildState<'g> {
                     id,
                     build_platform: platform,
                 });
-            } else if artifact.target.kind.iter().any(|x| x == "bin") {
+            } else if artifact
+                .target
+                .kind
+                .iter()
+                .any(|x| matches!(x, TargetKind::Bin))
+            {
                 // This is a non-test binary -- add it to the map.
                 // Error case here implies that the returned path wasn't in the target directory -- ignore it
                 // since it shouldn't happen in normal use.
@@ -262,7 +282,12 @@ impl<'g> BinaryListBuildState<'g> {
                         .insert(non_test_binary);
                 };
             }
-        } else if artifact.target.kind.iter().any(|x| x.contains("dylib")) {
+        } else if artifact
+            .target
+            .kind
+            .iter()
+            .any(|x| matches!(x, TargetKind::DyLib | TargetKind::CDyLib))
+        {
             // Also look for and grab dynamic libraries to store in archives.
             for filename in artifact.filenames {
                 if let Ok(rel_path) = filename.strip_prefix(&self.rust_build_meta.target_directory)
@@ -322,7 +347,7 @@ impl<'g> BinaryListBuildState<'g> {
         let in_workspace = self.graph.metadata(&package_id).map_or_else(
             |_| {
                 // Warn about processing a package that isn't in the package graph.
-                log::warn!(
+                warn!(
                     target: "nextest-runner::list",
                     "warning: saw package ID `{}` which wasn't produced by cargo metadata",
                     package_id
@@ -354,9 +379,28 @@ impl<'g> BinaryListBuildState<'g> {
             Some((_, p)) => p.into(),
             None => path,
         };
-        let rel_path = actual_path
-            .strip_prefix(&self.rust_build_meta.target_directory)
-            .ok()?;
+
+        let rel_path = match actual_path.strip_prefix(&self.rust_build_meta.target_directory) {
+            Ok(rel) => rel,
+            Err(_) => {
+                // For a seeded build (like in our test suite), Cargo will
+                // return:
+                //
+                // * the new path if the linked path exists
+                // * the original path if the linked path does not exist
+                //
+                // Linked paths not existing is not an ordinary condition, but
+                // we want to test it within nextest. We filter out paths if
+                // they're not a subdirectory of the target directory. With
+                // __NEXTEST_ALT_TARGET_DIR, we can simulate that for an
+                // alternate target directory.
+                if let Some(alt_target_dir) = &self.alt_target_dir {
+                    actual_path.strip_prefix(alt_target_dir).ok()?
+                } else {
+                    return None;
+                }
+            }
+        };
 
         self.rust_build_meta
             .linked_paths
@@ -476,14 +520,14 @@ mod tests {
         fake-package::bin/fake-binary
         fake-macro::proc-macro/fake-macro
         "};
-        static EXPECTED_HUMAN_VERBOSE: &str = indoc! {r#"
+        static EXPECTED_HUMAN_VERBOSE: &str = indoc! {r"
         fake-package::bin/fake-binary:
           bin: /fake/binary
           build platform: target
         fake-macro::proc-macro/fake-macro:
           bin: /fake/macro
           build platform: host
-        "#};
+        "};
         static EXPECTED_JSON_PRETTY: &str = indoc! {r#"
         {
           "rust-build-meta": {

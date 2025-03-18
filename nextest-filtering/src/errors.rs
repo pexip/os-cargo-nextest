@@ -1,13 +1,15 @@
 // Copyright (c) The nextest Contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::expression::FiltersetKind;
 use miette::{Diagnostic, SourceSpan};
+use std::fmt;
 use thiserror::Error;
 
-/// A set of errors that occurred while parsing a filter expression.
+/// A set of errors that occurred while parsing a filterset.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub struct FilterExpressionParseErrors {
+pub struct FiltersetParseErrors {
     /// The input string.
     pub input: String,
 
@@ -15,7 +17,7 @@ pub struct FilterExpressionParseErrors {
     pub errors: Vec<ParseSingleError>,
 }
 
-impl FilterExpressionParseErrors {
+impl FiltersetParseErrors {
     pub(crate) fn new(input: impl Into<String>, errors: Vec<ParseSingleError>) -> Self {
         Self {
             input: input.into(),
@@ -24,7 +26,7 @@ impl FilterExpressionParseErrors {
     }
 }
 
-/// An individual error that occurred while parsing a filter expression.
+/// An individual error that occurred while parsing a filterset.
 #[derive(Clone, Debug, Error, Diagnostic, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ParseSingleError {
@@ -48,6 +50,20 @@ pub enum ParseSingleError {
 
         /// The underlying error.
         error: GlobConstructError,
+    },
+
+    /// A banned predicate was encountered.
+    #[error("predicate not allowed in `{kind}` expressions")]
+    BannedPredicate {
+        /// The kind of expression.
+        kind: FiltersetKind,
+
+        /// The span of the banned predicate.
+        #[label("this predicate causes {reason}")]
+        span: SourceSpan,
+
+        /// The reason why the predicate is banned.
+        reason: BannedPredicateReason,
     },
 
     /// An invalid regex was encountered but we couldn't determine a better error message.
@@ -101,6 +117,14 @@ pub enum ParseSingleError {
     /// This matcher didn't match any packages.
     #[error("operator didn't match any packages")]
     NoPackageMatch(#[label("no packages matched this")] SourceSpan),
+
+    /// This matcher didn't match any binary IDs.
+    #[error("operator didn't match any binary IDs")]
+    NoBinaryIdMatch(#[label("no binary IDs matched this")] SourceSpan),
+
+    /// This matcher didn't match any binary names.
+    #[error("operator didn't match any binary names")]
+    NoBinaryNameMatch(#[label("no binary names matched this")] SourceSpan),
 
     /// Expected "host" or "target" for a `platform()` predicate.
     #[error("invalid argument for platform")]
@@ -162,5 +186,21 @@ impl<'a> State<'a> {
 
     pub fn report_error(&mut self, error: ParseSingleError) {
         self.errors.push(error);
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BannedPredicateReason {
+    /// This predicate causes infinite recursion.
+    InfiniteRecursion,
+}
+
+impl fmt::Display for BannedPredicateReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BannedPredicateReason::InfiniteRecursion => {
+                write!(f, "infinite recursion")
+            }
+        }
     }
 }

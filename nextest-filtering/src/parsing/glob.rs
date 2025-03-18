@@ -3,12 +3,12 @@
 
 //! Glob matching.
 
-use super::{parse_matcher_text, Error, Span};
+use super::{Error, Span, parse_matcher_text};
 use crate::{
-    errors::{GlobConstructError, ParseSingleError},
     NameMatcher,
+    errors::{GlobConstructError, ParseSingleError},
 };
-use winnow::{combinator::trace, stream::Location, Parser};
+use winnow::{ModalParser, Parser, combinator::trace, stream::Location};
 
 /// A glob pattern.
 ///
@@ -58,9 +58,11 @@ impl GenericGlob {
 }
 
 // This never returns Err(()) -- instead, it reports an error to the parsing state.
-pub(super) fn parse_glob<'i>(implicit: bool) -> impl Parser<Span<'i>, Option<NameMatcher>, Error> {
+pub(super) fn parse_glob<'i>(
+    implicit: bool,
+) -> impl ModalParser<Span<'i>, Option<NameMatcher>, Error> {
     trace("parse_glob", move |input: &mut Span<'i>| {
-        let start = input.location();
+        let start = input.current_token_start();
         let res = match parse_matcher_text.parse_next(input) {
             Ok(res) => res,
             Err(_) => {
@@ -75,7 +77,7 @@ pub(super) fn parse_glob<'i>(implicit: bool) -> impl Parser<Span<'i>, Option<Nam
         match GenericGlob::new(parsed_value) {
             Ok(glob) => Ok(Some(NameMatcher::Glob { glob, implicit })),
             Err(error) => {
-                let end = input.location();
+                let end = input.current_token_start();
                 let err = ParseSingleError::InvalidGlob {
                     span: (start, end - start).into(),
                     error,

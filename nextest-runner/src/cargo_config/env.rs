@@ -4,7 +4,7 @@
 use super::{CargoConfigSource, CargoConfigs, DiscoveredConfig};
 use camino::{Utf8Path, Utf8PathBuf};
 use std::{
-    collections::{btree_map::Entry, BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     ffi::OsString,
     process::Command,
 };
@@ -40,8 +40,7 @@ impl EnvironmentMap {
         let mut map = BTreeMap::<imp::EnvKey, CargoEnvironmentVariable>::new();
 
         for (source, name, value) in env_configs {
-            #[allow(clippy::useless_conversion)]
-            match map.entry(OsString::from(name.clone()).into()) {
+            match map.entry(imp::EnvKey::from(name.clone())) {
                 Entry::Occupied(mut entry) => {
                     // Ignore the value lower in precedence, but do look at force and relative if
                     // they haven't been set already.
@@ -79,7 +78,7 @@ impl EnvironmentMap {
     }
 
     pub(crate) fn apply_env(&self, command: &mut Command) {
-        #[allow(clippy::useless_conversion)]
+        #[cfg_attr(not(windows), expect(clippy::useless_conversion))]
         let existing_keys: BTreeSet<imp::EnvKey> =
             std::env::vars_os().map(|(k, _v)| k.into()).collect();
 
@@ -114,12 +113,13 @@ impl EnvironmentMap {
     }
 }
 
-/// An environment variable set in `config.toml`. See https://doc.rust-lang.org/cargo/reference/config.html#env
+/// An environment variable set in `config.toml`. See
+/// <https://doc.rust-lang.org/cargo/reference/config.html#env>.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CargoEnvironmentVariable {
     /// The source `config.toml` file. See
-    /// https://doc.rust-lang.org/cargo/reference/config.html#hierarchical-structure for the lookup
-    /// order.
+    /// <https://doc.rust-lang.org/cargo/reference/config.html#hierarchical-structure> for the
+    /// lookup order.
     pub source: Option<Utf8PathBuf>,
 
     /// The name of the environment variable to set.
@@ -157,7 +157,7 @@ mod imp {
     use super::*;
     use std::{borrow::Borrow, cmp, ffi::OsStr, os::windows::prelude::OsStrExt};
     use windows_sys::Win32::Globalization::{
-        CompareStringOrdinal, CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN,
+        CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal,
     };
 
     pub(super) fn strip_unc_prefix(path: &Utf8Path) -> &Utf8Path {
@@ -246,6 +246,12 @@ mod imp {
                 utf16: k.encode_wide().collect(),
                 os_string: k,
             }
+        }
+    }
+
+    impl From<String> for EnvKey {
+        fn from(k: String) -> Self {
+            OsString::from(k).into()
         }
     }
 

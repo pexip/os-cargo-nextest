@@ -3,20 +3,30 @@
 
 use crate::fixtures::*;
 use cfg_if::cfg_if;
-use color_eyre::eyre::Result;
-use nextest_filtering::FilteringExpr;
-use nextest_metadata::{BuildPlatform, FilterMatch, MismatchReason};
+use color_eyre::eyre::{Result, ensure};
+use fixture_data::{
+    models::{TestCaseFixtureStatus, TestSuiteFixture},
+    nextest_tests::{EXPECTED_TEST_SUITES, get_expected_test},
+};
+use nextest_filtering::{Filterset, FiltersetKind, ParseContext};
+use nextest_metadata::{FilterMatch, MismatchReason};
 use nextest_runner::{
     config::{NextestConfig, RetryPolicy},
     double_spawn::DoubleSpawnInfo,
+    input::InputHandlerKind,
     list::BinaryList,
     platform::BuildPlatforms,
-    reporter::heuristic_extract_description,
-    runner::{ExecutionDescription, ExecutionResult, TestRunnerBuilder},
+    reporter::{
+        UnitErrorDescription,
+        events::{
+            ExecutionDescription, ExecutionResult, FinalRunStats, RunStatsFailureKind, UnitKind,
+        },
+    },
+    runner::TestRunnerBuilder,
     signal::SignalHandlerKind,
     target_runner::TargetRunner,
-    test_filter::{RunIgnored, TestFilterBuilder},
-    test_output::TestOutput,
+    test_filter::{RunIgnored, TestFilterBuilder, TestFilterPatterns},
+    test_output::{ChildExecutionOutput, ChildOutput},
 };
 use pretty_assertions::assert_eq;
 use std::{io::Cursor, time::Duration};
@@ -34,23 +44,25 @@ fn test_list_binaries() -> Result<()> {
         build_platforms,
     )?;
 
-    for (id, name, platform_is_target) in &EXPECTED_BINARY_LIST {
+    for TestSuiteFixture {
+        binary_id,
+        binary_name,
+        build_platform,
+        ..
+    } in EXPECTED_TEST_SUITES.values()
+    {
         let bin = binary_list
             .rust_binaries
             .iter()
-            .find(|bin| bin.id.as_str() == *id)
+            .find(|bin| bin.id == *binary_id)
             .unwrap();
         // With Rust 1.79 and later, the actual name has - replaced with _. Just check for either.
         assert!(
-            bin.name.as_str() == *name || bin.name.as_str() == name.replace('-', "_"),
-            "binary name matches (expected: {name}, actual: {})",
+            bin.name.as_str() == *binary_name || bin.name.as_str() == binary_name.replace('-', "_"),
+            "binary name matches (expected: {binary_name}, actual: {})",
             bin.name,
         );
-        if *platform_is_target {
-            assert_eq!(BuildPlatform::Target, bin.build_platform);
-        } else {
-            assert_eq!(BuildPlatform::Host, bin.build_platform);
-        }
+        assert_eq!(*build_platform, bin.build_platform);
     }
     Ok(())
 }
@@ -59,11 +71,15 @@ fn test_list_binaries() -> Result<()> {
 fn test_list_tests() -> Result<()> {
     set_env_vars();
 
-    let test_filter = TestFilterBuilder::any(RunIgnored::Default);
-    let test_list = FIXTURE_TARGETS.make_test_list(&test_filter, &TargetRunner::empty())?;
+    let test_filter = TestFilterBuilder::default_set(RunIgnored::Default);
+    let test_list = FIXTURE_TARGETS.make_test_list(
+        NextestConfig::DEFAULT_PROFILE,
+        &test_filter,
+        &TargetRunner::empty(),
+    )?;
     let mut summary = test_list.to_summary();
 
-    for (name, expected) in &*EXPECTED_TESTS {
+    for (name, expected) in &*EXPECTED_TEST_SUITES {
         let test_binary = FIXTURE_TARGETS
             .test_artifacts
             .get(name)
@@ -77,7 +93,7 @@ fn test_list_tests() -> Result<()> {
             .iter()
             .map(|(name, info)| (name.as_str(), info.filter_match))
             .collect();
-        assert_eq!(expected, &tests, "test list matches");
+        assert_eq!(&expected.test_cases, &tests, "test list matches");
     }
 
     // Are there any remaining tests?
@@ -98,8 +114,12 @@ fn test_list_tests() -> Result<()> {
 fn test_run() -> Result<()> {
     set_env_vars();
 
-    let test_filter = TestFilterBuilder::any(RunIgnored::Default);
-    let test_list = FIXTURE_TARGETS.make_test_list(&test_filter, &TargetRunner::empty())?;
+    let test_filter = TestFilterBuilder::default_set(RunIgnored::Default);
+    let test_list = FIXTURE_TARGETS.make_test_list(
+        NextestConfig::DEFAULT_PROFILE,
+        &test_filter,
+        &TargetRunner::empty(),
+    )?;
     let config = load_config();
     let profile = config
         .profile(NextestConfig::DEFAULT_PROFILE)
@@ -113,6 +133,7 @@ fn test_run() -> Result<()> {
             &profile,
             vec![], // we aren't testing CLI args at the moment
             SignalHandlerKind::Noop,
+            InputHandlerKind::Noop,
             DoubleSpawnInfo::disabled(),
             TargetRunner::empty(),
         )
@@ -120,12 +141,12 @@ fn test_run() -> Result<()> {
 
     let (instance_statuses, run_stats) = execute_collect(runner);
 
-    for (binary_id, expected) in &*EXPECTED_TESTS {
+    for (binary_id, expected) in &*EXPECTED_TEST_SUITES {
         let test_binary = FIXTURE_TARGETS
             .test_artifacts
             .get(binary_id)
             .unwrap_or_else(|| panic!("unexpected binary ID {binary_id}"));
-        for fixture in expected {
+        for fixture in &expected.test_cases {
             let instance_value = instance_statuses
                 .get(&(test_binary.binary_path.as_path(), fixture.name))
                 .unwrap_or_else(|| {
@@ -135,62 +156,81 @@ fn test_run() -> Result<()> {
                         fixture.name
                     )
                 });
-            let valid = match &instance_value.status {
-                InstanceStatus::Skipped(_) => fixture.status.is_ignored(),
-                InstanceStatus::Finished(run_statuses) => {
-                    // This test should not have been retried since retries aren't configured.
-                    assert_eq!(
-                        run_statuses.len(),
-                        1,
-                        "test {} should have been run exactly once",
-                        fixture.name
-                    );
-                    let run_status = run_statuses.last_status();
+            let valid = || {
+                match &instance_value.status {
+                    InstanceStatus::Skipped(_) => {
+                        ensure!(fixture.status.is_ignored(), "test should be skipped");
+                        Ok(())
+                    }
+                    InstanceStatus::Finished(run_statuses) => {
+                        // This test should not have been retried since retries aren't configured.
+                        assert_eq!(
+                            run_statuses.len(),
+                            1,
+                            "test {} should have been run exactly once",
+                            fixture.name
+                        );
+                        let run_status = run_statuses.last_status();
 
-                    if run_status.result != fixture.status.to_test_status(1) {
-                        false
-                    } else {
+                        ensure_execution_result(&run_status.result, fixture.status, 1)?;
                         // Extracting descriptions works for segfaults on Unix but not on Windows.
-                        #[allow(unused_mut)]
-                        let mut can_extract_description = fixture.status == FixtureStatus::Fail
-                            || fixture.status == FixtureStatus::IgnoredFail;
+                        #[cfg_attr(not(unix), expect(unused_mut))]
+                        let mut can_extract_description = fixture.status
+                            == TestCaseFixtureStatus::Fail
+                            || fixture.status == TestCaseFixtureStatus::IgnoredFail;
                         cfg_if! {
                             if #[cfg(unix)] {
-                                can_extract_description |= fixture.status == FixtureStatus::Segfault;
+                                can_extract_description |= fixture.status == TestCaseFixtureStatus::Segfault;
                             }
                         }
 
                         if can_extract_description {
                             // Check that stderr can be parsed heuristically.
-                            let Some(TestOutput::Split { stdout, stderr }) = &run_status.output
+                            let ChildExecutionOutput::Output {
+                                output: ChildOutput::Split(split),
+                                ..
+                            } = &run_status.output
                             else {
                                 panic!("this test should always use split output")
                             };
-                            let stdout = stdout.to_str_lossy();
-                            let stderr = stderr.to_str_lossy();
-                            println!("stderr: {stderr}");
-                            let description =
-                                heuristic_extract_description(run_status.result, &stdout, &stderr);
+                            let stdout = split.stdout.as_ref().expect("stdout should be captured");
+                            let stderr = split.stderr.as_ref().expect("stderr should be captured");
+
+                            println!("stderr: {}", stderr.as_str_lossy());
+                            let desc =
+                                UnitErrorDescription::new(UnitKind::Test, &run_status.output);
                             assert!(
-                                description.is_some(),
-                                "failed to extract description from {}\n*** stdout:\n{stdout}\n*** stderr:\n{stderr}\n",
-                                fixture.name
+                                desc.child_process_error_list().is_some(),
+                                "failed to extract description from {}\n*** stdout:\n{}\n*** stderr:\n{}\n",
+                                fixture.name,
+                                stdout.as_str_lossy(),
+                                stderr.as_str_lossy(),
                             );
                         }
-                        true
+
+                        Ok(())
                     }
                 }
             };
-            if !valid {
+            if let Err(error) = valid() {
                 panic!(
-                    "for test {}, mismatch in status: expected {:?}, actual {:?}",
-                    fixture.name, fixture.status, instance_value.status
+                    "for test {}, mismatch in status: expected {:?}, actual {:?}, error: {}",
+                    fixture.name, fixture.status, instance_value.status, error,
                 );
             }
         }
     }
 
-    assert!(!run_stats.is_success(), "run should be marked failed");
+    // Note: can't compare not_run because its exact value would depend on the number of threads on
+    // the machine.
+    assert!(
+        matches!(
+            run_stats.summarize_final(),
+            FinalRunStats::Failed(RunStatsFailureKind::Test { .. })
+        ),
+        "run should be marked failed, but got {:?}",
+        run_stats.summarize_final(),
+    );
     Ok(())
 }
 
@@ -198,17 +238,26 @@ fn test_run() -> Result<()> {
 fn test_run_ignored() -> Result<()> {
     set_env_vars();
 
-    let expr =
-        FilteringExpr::parse("not test(test_slow_timeout)".to_owned(), &PACKAGE_GRAPH).unwrap();
+    let pcx = ParseContext::new(&PACKAGE_GRAPH);
+    let expr = Filterset::parse(
+        "not test(test_slow_timeout)".to_owned(),
+        &pcx,
+        FiltersetKind::Test,
+    )
+    .unwrap();
 
     let test_filter = TestFilterBuilder::new(
-        RunIgnored::IgnoredOnly,
+        RunIgnored::Only,
         None,
-        Vec::<String>::new(),
+        TestFilterPatterns::default(),
         vec![expr],
     )
     .unwrap();
-    let test_list = FIXTURE_TARGETS.make_test_list(&test_filter, &TargetRunner::empty())?;
+    let test_list = FIXTURE_TARGETS.make_test_list(
+        NextestConfig::DEFAULT_PROFILE,
+        &test_filter,
+        &TargetRunner::empty(),
+    )?;
     let config = load_config();
     let profile = config
         .profile(NextestConfig::DEFAULT_PROFILE)
@@ -222,6 +271,7 @@ fn test_run_ignored() -> Result<()> {
             &profile,
             vec![],
             SignalHandlerKind::Noop,
+            InputHandlerKind::Noop,
             DoubleSpawnInfo::disabled(),
             TargetRunner::empty(),
         )
@@ -229,12 +279,12 @@ fn test_run_ignored() -> Result<()> {
 
     let (instance_statuses, run_stats) = execute_collect(runner);
 
-    for (name, expected) in &*EXPECTED_TESTS {
+    for (name, expected) in &*EXPECTED_TEST_SUITES {
         let test_binary = FIXTURE_TARGETS
             .test_artifacts
             .get(name)
             .unwrap_or_else(|| panic!("unexpected test name {name}"));
-        for fixture in expected {
+        for fixture in &expected.test_cases {
             if fixture.name.contains("test_slow_timeout") {
                 // These tests are filtered out by the expression above.
                 continue;
@@ -242,7 +292,13 @@ fn test_run_ignored() -> Result<()> {
             let instance_value =
                 &instance_statuses[&(test_binary.binary_path.as_path(), fixture.name)];
             let valid = match &instance_value.status {
-                InstanceStatus::Skipped(_) => !fixture.status.is_ignored(),
+                InstanceStatus::Skipped(_) => {
+                    ensure!(
+                        !fixture.status.is_ignored(),
+                        "non-ignored tests should be skipped"
+                    );
+                    Ok(())
+                }
                 InstanceStatus::Finished(run_statuses) => {
                     // This test should not have been retried since retries aren't configured.
                     assert_eq!(
@@ -252,41 +308,59 @@ fn test_run_ignored() -> Result<()> {
                         fixture.name
                     );
                     let run_status = run_statuses.last_status();
-                    run_status.result == fixture.status.to_test_status(1)
+                    ensure_execution_result(&run_status.result, fixture.status, 1)
                 }
             };
-            if !valid {
+            if let Err(error) = valid {
                 panic!(
-                    "for test {}, mismatch in status: expected {:?}, actual {:?}",
-                    fixture.name, fixture.status, instance_value.status
+                    "for test {}, mismatch in status: expected {:?}, actual {:?}, error: {}",
+                    fixture.name, fixture.status, instance_value.status, error,
                 );
             }
         }
     }
 
-    assert!(!run_stats.is_success(), "run should be marked failed");
+    // Note: can't compare not_run because its exact value would depend on the number of threads on
+    // the machine.
+    assert!(
+        matches!(
+            run_stats.summarize_final(),
+            FinalRunStats::Failed(RunStatsFailureKind::Test { .. })
+        ),
+        "run should be marked failed, but got {:?}",
+        run_stats.summarize_final(),
+    );
     Ok(())
 }
 
-/// Test that filter expressions with regular substring filters behave as expected.
+/// Test that filtersets with regular substring filters behave as expected.
 #[test]
 fn test_filter_expr_with_string_filters() -> Result<()> {
     set_env_vars();
 
-    let expr = FilteringExpr::parse(
+    let pcx = ParseContext::new(&PACKAGE_GRAPH);
+    let expr = Filterset::parse(
         "test(test_multiply_two) | test(=tests::call_dylib_add_two)".to_owned(),
-        &PACKAGE_GRAPH,
+        &pcx,
+        FiltersetKind::Test,
     )
-    .expect("filter expression is valid");
+    .expect("filterset is valid");
 
     let test_filter = TestFilterBuilder::new(
         RunIgnored::Default,
         None,
-        ["call_dylib_add_two", "test_flaky_mod_4"],
+        TestFilterPatterns::new(vec![
+            "call_dylib_add_two".to_owned(),
+            "test_flaky_mod_4".to_owned(),
+        ]),
         vec![expr],
     )
     .unwrap();
-    let test_list = FIXTURE_TARGETS.make_test_list(&test_filter, &TargetRunner::empty())?;
+    let test_list = FIXTURE_TARGETS.make_test_list(
+        NextestConfig::DEFAULT_PROFILE,
+        &test_filter,
+        &TargetRunner::empty(),
+    )?;
     for test in test_list.iter_tests() {
         if test.name == "tests::call_dylib_add_two" {
             assert!(
@@ -312,13 +386,13 @@ fn test_filter_expr_with_string_filters() -> Result<()> {
         } else {
             // Mismatch both string and expression filters. nextest-runner returns:
             // * first, ignored
-            // * then, expression
             // * then, for string
+            // * then, expression
             let expected_test = get_expected_test(&test.suite_info.binary_id, test.name);
             let reason = if expected_test.status.is_ignored() {
                 MismatchReason::Ignored
             } else {
-                MismatchReason::Expression
+                MismatchReason::String
             };
             assert_eq!(
                 test.test_info.filter_match,
@@ -331,21 +405,31 @@ fn test_filter_expr_with_string_filters() -> Result<()> {
     Ok(())
 }
 
-/// Test that filter expressions without regular substring filters behave as expected.
+/// Test that filtersets without regular substring filters behave as expected.
 #[test]
 fn test_filter_expr_without_string_filters() -> Result<()> {
     set_env_vars();
 
-    let expr = FilteringExpr::parse(
+    let pcx = ParseContext::new(&PACKAGE_GRAPH);
+    let expr = Filterset::parse(
         "test(test_multiply_two) | test(=tests::call_dylib_add_two)".to_owned(),
-        &PACKAGE_GRAPH,
+        &pcx,
+        FiltersetKind::Test,
     )
-    .expect("filter expression is valid");
+    .expect("filterset is valid");
 
-    let test_filter =
-        TestFilterBuilder::new(RunIgnored::Default, None, Vec::<String>::new(), vec![expr])
-            .unwrap();
-    let test_list = FIXTURE_TARGETS.make_test_list(&test_filter, &TargetRunner::empty())?;
+    let test_filter = TestFilterBuilder::new(
+        RunIgnored::Default,
+        None,
+        TestFilterPatterns::default(),
+        vec![expr],
+    )
+    .unwrap();
+    let test_list = FIXTURE_TARGETS.make_test_list(
+        NextestConfig::DEFAULT_PROFILE,
+        &test_filter,
+        &TargetRunner::empty(),
+    )?;
     for test in test_list.iter_tests() {
         if test.name.contains("test_multiply_two") || test.name == "tests::call_dylib_add_two" {
             assert!(
@@ -370,11 +454,18 @@ fn test_string_filters_without_filter_expr() -> Result<()> {
     let test_filter = TestFilterBuilder::new(
         RunIgnored::Default,
         None,
-        vec!["test_multiply_two", "tests::call_dylib_add_two"],
+        TestFilterPatterns::new(vec![
+            "test_multiply_two".to_owned(),
+            "tests::call_dylib_add_two".to_owned(),
+        ]),
         vec![],
     )
     .unwrap();
-    let test_list = FIXTURE_TARGETS.make_test_list(&test_filter, &TargetRunner::empty())?;
+    let test_list = FIXTURE_TARGETS.make_test_list(
+        NextestConfig::DEFAULT_PROFILE,
+        &test_filter,
+        &TargetRunner::empty(),
+    )?;
     for test in test_list.iter_tests() {
         if test.name.contains("test_multiply_two")
             || test.name.contains("tests::call_dylib_add_two")
@@ -405,8 +496,12 @@ fn test_string_filters_without_filter_expr() -> Result<()> {
 fn test_retries(retries: Option<RetryPolicy>) -> Result<()> {
     set_env_vars();
 
-    let test_filter = TestFilterBuilder::any(RunIgnored::Default);
-    let test_list = FIXTURE_TARGETS.make_test_list(&test_filter, &TargetRunner::empty())?;
+    let test_filter = TestFilterBuilder::default_set(RunIgnored::Default);
+    let test_list = FIXTURE_TARGETS.make_test_list(
+        NextestConfig::DEFAULT_PROFILE,
+        &test_filter,
+        &TargetRunner::empty(),
+    )?;
     let config = load_config();
     let profile = config
         .profile("with-retries")
@@ -431,6 +526,7 @@ fn test_retries(retries: Option<RetryPolicy>) -> Result<()> {
             &profile,
             vec![],
             SignalHandlerKind::Noop,
+            InputHandlerKind::Noop,
             DoubleSpawnInfo::disabled(),
             TargetRunner::empty(),
         )
@@ -438,32 +534,32 @@ fn test_retries(retries: Option<RetryPolicy>) -> Result<()> {
 
     let (instance_statuses, run_stats) = execute_collect(runner);
 
-    for (name, expected) in &*EXPECTED_TESTS {
+    for (name, expected) in &*EXPECTED_TEST_SUITES {
         let test_binary = FIXTURE_TARGETS
             .test_artifacts
             .get(name)
             .unwrap_or_else(|| panic!("unexpected test name {name}"));
-        for fixture in expected {
+        for fixture in &expected.test_cases {
             let instance_value =
                 &instance_statuses[&(test_binary.binary_path.as_path(), fixture.name)];
             let valid = match &instance_value.status {
                 InstanceStatus::Skipped(_) => fixture.status.is_ignored(),
                 InstanceStatus::Finished(run_statuses) => {
                     let expected_len = match fixture.status {
-                        FixtureStatus::Flaky { pass_attempt } => {
+                        TestCaseFixtureStatus::Flaky { pass_attempt } => {
                             if retries.is_some() {
                                 pass_attempt.min(profile_retries.count() + 1)
                             } else {
                                 pass_attempt
                             }
                         }
-                        FixtureStatus::Pass | FixtureStatus::Leak => 1,
+                        TestCaseFixtureStatus::Pass | TestCaseFixtureStatus::Leak => 1,
                         // Note that currently only the flaky test fixtures are controlled by overrides.
                         // If more tests are controlled by retry overrides, this may need to be updated.
-                        FixtureStatus::Fail | FixtureStatus::Segfault => {
-                            profile_retries.count() + 1
-                        }
-                        FixtureStatus::IgnoredPass | FixtureStatus::IgnoredFail => {
+                        TestCaseFixtureStatus::Fail
+                        | TestCaseFixtureStatus::FailLeak
+                        | TestCaseFixtureStatus::Segfault => profile_retries.count() + 1,
+                        TestCaseFixtureStatus::IgnoredPass | TestCaseFixtureStatus::IgnoredFail => {
                             unreachable!("ignored tests should be skipped")
                         }
                     };
@@ -477,7 +573,7 @@ fn test_retries(retries: Option<RetryPolicy>) -> Result<()> {
 
                     match run_statuses.describe() {
                         ExecutionDescription::Success { single_status } => {
-                            if fixture.status == FixtureStatus::Leak {
+                            if fixture.status == TestCaseFixtureStatus::Leak {
                                 single_status.result == ExecutionResult::Leak
                             } else {
                                 single_status.result == ExecutionResult::Pass
@@ -538,7 +634,16 @@ fn test_retries(retries: Option<RetryPolicy>) -> Result<()> {
         }
     }
 
-    assert!(!run_stats.is_success(), "run should be marked failed");
+    // Note: can't compare not_run because its exact value would depend on the number of threads on
+    // the machine.
+    assert!(
+        matches!(
+            run_stats.summarize_final(),
+            FinalRunStats::Failed(RunStatsFailureKind::Test { .. })
+        ),
+        "run should be marked failed, but got {:?}",
+        run_stats.summarize_final(),
+    );
     Ok(())
 }
 
@@ -546,17 +651,23 @@ fn test_retries(retries: Option<RetryPolicy>) -> Result<()> {
 fn test_termination() -> Result<()> {
     set_env_vars();
 
-    let expr =
-        FilteringExpr::parse("test(/^test_slow_timeout/)".to_owned(), &PACKAGE_GRAPH).unwrap();
+    let pcx = ParseContext::new(&PACKAGE_GRAPH);
+    let expr = Filterset::parse(
+        "test(/^test_slow_timeout/)".to_owned(),
+        &pcx,
+        FiltersetKind::Test,
+    )
+    .unwrap();
     let test_filter = TestFilterBuilder::new(
-        RunIgnored::IgnoredOnly,
+        RunIgnored::Only,
         None,
-        Vec::<String>::new(),
+        TestFilterPatterns::default(),
         vec![expr],
     )
     .unwrap();
 
-    let test_list = FIXTURE_TARGETS.make_test_list(&test_filter, &TargetRunner::empty())?;
+    let test_list =
+        FIXTURE_TARGETS.make_test_list("with-termination", &test_filter, &TargetRunner::empty())?;
     let config = load_config();
     let profile = config
         .profile("with-termination")
@@ -570,6 +681,7 @@ fn test_termination() -> Result<()> {
             &profile,
             vec![],
             SignalHandlerKind::Noop,
+            InputHandlerKind::Noop,
             DoubleSpawnInfo::disabled(),
             TargetRunner::empty(),
         )

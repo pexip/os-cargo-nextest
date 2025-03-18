@@ -4,41 +4,41 @@
 //! Setup scripts.
 
 use super::{
-    ConfigIdentifier, FinalConfig, MaybeTargetSpec, NextestProfile, PlatformStrings,
+    ConfigIdentifier, EvaluatableProfile, FinalConfig, MaybeTargetSpec, PlatformStrings,
     PreBuildPlatform, SlowTimeout,
 };
 use crate::{
     double_spawn::{DoubleSpawnContext, DoubleSpawnInfo},
-    errors::{ConfigParseCompiledDataError, InvalidConfigScriptName, SetupScriptError},
+    errors::{
+        ChildStartError, ConfigCompileError, ConfigCompileErrorKind, ConfigCompileSection,
+        InvalidConfigScriptName,
+    },
     list::TestList,
     platform::BuildPlatforms,
-    test_command::{apply_ld_dyld_env, create_command, LocalExecuteContext},
+    reporter::events::SetupScriptEnvMap,
+    test_command::{apply_ld_dyld_env, create_command},
 };
-use camino::Utf8Path;
 use camino_tempfile::Utf8TempPath;
-use guppy::graph::{cargo::BuildPlatform, PackageGraph};
+use guppy::graph::cargo::BuildPlatform;
 use indexmap::IndexMap;
-use nextest_filtering::{FilteringExpr, TestQuery};
-use serde::{de::Error, Deserialize};
+use nextest_filtering::{EvalContext, Filterset, FiltersetKind, ParseContext, TestQuery};
+use serde::{Deserialize, de::Error};
 use smol_str::SmolStr;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     fmt,
     process::Command,
+    sync::Arc,
     time::Duration,
 };
-use tokio::io::{AsyncBufReadExt, BufReader};
 
-/// Data about setup scripts, returned by a [`NextestProfile`].
+/// Data about setup scripts, returned by an [`EvaluatableProfile`].
 pub struct SetupScripts<'profile> {
     enabled_scripts: IndexMap<&'profile ScriptId, SetupScript<'profile>>,
 }
 
 impl<'profile> SetupScripts<'profile> {
-    pub(super) fn new(
-        profile: &'profile NextestProfile<'_, FinalConfig>,
-        test_list: &TestList<'_>,
-    ) -> Self {
+    pub(super) fn new(profile: &'profile EvaluatableProfile<'_>, test_list: &TestList<'_>) -> Self {
         Self::new_with_queries(
             profile,
             test_list
@@ -50,7 +50,7 @@ impl<'profile> SetupScripts<'profile> {
 
     // Creates a new `SetupScripts` instance for the given profile and matching tests.
     fn new_with_queries<'a>(
-        profile: &'profile NextestProfile<'_, FinalConfig>,
+        profile: &'profile EvaluatableProfile<'_>,
         matching_tests: impl IntoIterator<Item = TestQuery<'a>>,
     ) -> Self {
         let script_config = profile.script_config();
@@ -72,6 +72,8 @@ impl<'profile> SetupScripts<'profile> {
             }
         }
 
+        let env = profile.filterset_ecx();
+
         // This is a map from enabled setup scripts to a list of configurations that enabled them.
         let mut enabled_ids = HashSet::new();
         for test in matching_tests {
@@ -81,7 +83,7 @@ impl<'profile> SetupScripts<'profile> {
                     // This script is already enabled.
                     continue;
                 }
-                if compiled.iter().any(|data| data.is_enabled(&test)) {
+                if compiled.iter().any(|data| data.is_enabled(&test, &env)) {
                     enabled_ids.insert(script_id);
                 }
             }
@@ -143,31 +145,11 @@ pub(crate) struct SetupScript<'profile> {
     pub(crate) compiled: Vec<&'profile CompiledProfileScripts<FinalConfig>>,
 }
 
-impl<'profile> SetupScript<'profile> {
-    /// Turns self into a command that can be executed.
-    pub(crate) fn make_command(
-        &self,
-        double_spawn: &DoubleSpawnInfo,
-        test_list: &TestList<'_>,
-    ) -> Result<SetupScriptCommand, SetupScriptError> {
-        let lctx = LocalExecuteContext {
-            rust_build_meta: test_list.rust_build_meta(),
-            double_spawn,
-            dylib_path: test_list.updated_dylib_path(),
-            env: test_list.cargo_env(),
-        };
-        SetupScriptCommand::new(
-            &lctx,
-            self.config.program().to_owned(),
-            self.config.args(),
-            test_list.workspace_root(),
-        )
-    }
-
-    pub(crate) fn is_enabled(&self, test: &TestQuery<'_>) -> bool {
+impl SetupScript<'_> {
+    pub(crate) fn is_enabled(&self, test: &TestQuery<'_>, cx: &EvalContext<'_>) -> bool {
         self.compiled
             .iter()
-            .any(|compiled| compiled.is_enabled(test))
+            .any(|compiled| compiled.is_enabled(test, cx))
     }
 }
 
@@ -184,32 +166,34 @@ pub(crate) struct SetupScriptCommand {
 impl SetupScriptCommand {
     /// Creates a new `SetupScriptCommand` for a setup script.
     pub(crate) fn new(
-        lctx: &LocalExecuteContext<'_>,
-        program: String,
-        args: &[String],
-        cwd: &Utf8Path,
-    ) -> Result<Self, SetupScriptError> {
-        let mut cmd = create_command(program, args, lctx.double_spawn);
+        config: &ScriptConfig,
+        profile_name: &str,
+        double_spawn: &DoubleSpawnInfo,
+        test_list: &TestList<'_>,
+    ) -> Result<Self, ChildStartError> {
+        let mut cmd = create_command(config.program().to_owned(), config.args(), double_spawn);
 
         // NB: we will always override user-provided environment variables with the
         // `CARGO_*` and `NEXTEST_*` variables set directly on `cmd` below.
-        lctx.env.apply_env(&mut cmd);
+        test_list.cargo_env().apply_env(&mut cmd);
 
         let env_path = camino_tempfile::Builder::new()
             .prefix("nextest-env")
             .tempfile()
-            .map_err(SetupScriptError::TempPath)?
+            .map_err(|error| ChildStartError::TempPath(Arc::new(error)))?
             .into_temp_path();
 
-        cmd.current_dir(cwd)
+        cmd.current_dir(test_list.workspace_root())
             // This environment variable is set to indicate that tests are being run under nextest.
             .env("NEXTEST", "1")
+            // Set the nextest profile.
+            .env("NEXTEST_PROFILE", profile_name)
             // Setup scripts can define environment variables which are written out here.
             .env("NEXTEST_ENV", &env_path);
 
-        apply_ld_dyld_env(&mut cmd, lctx.dylib_path);
+        apply_ld_dyld_env(&mut cmd, test_list.updated_dylib_path());
 
-        let double_spawn = lctx.double_spawn.spawn_context();
+        let double_spawn = double_spawn.spawn_context();
 
         Ok(Self {
             command: cmd,
@@ -251,70 +235,14 @@ impl<'profile> SetupScriptExecuteData<'profile> {
     }
 
     /// Applies the data from setup scripts to the given test instance.
-    pub(crate) fn apply(&self, test: &TestQuery<'_>, command: &mut Command) {
+    pub(crate) fn apply(&self, test: &TestQuery<'_>, cx: &EvalContext<'_>, command: &mut Command) {
         for (script, env_map) in &self.env_maps {
-            if script.is_enabled(test) {
+            if script.is_enabled(test, cx) {
                 for (key, value) in env_map.env_map.iter() {
                     command.env(key, value);
                 }
             }
         }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct SetupScriptEnvMap {
-    env_map: BTreeMap<String, String>,
-}
-
-impl SetupScriptEnvMap {
-    pub(crate) async fn new(env_path: &Utf8Path) -> Result<Self, SetupScriptError> {
-        let mut env_map = BTreeMap::new();
-        let f = tokio::fs::File::open(env_path).await.map_err(|error| {
-            SetupScriptError::EnvFileOpen {
-                path: env_path.to_owned(),
-                error,
-            }
-        })?;
-        let reader = BufReader::new(f);
-        let mut lines = reader.lines();
-        loop {
-            let line = lines
-                .next_line()
-                .await
-                .map_err(|error| SetupScriptError::EnvFileRead {
-                    path: env_path.to_owned(),
-                    error,
-                })?;
-            let Some(line) = line else { break };
-
-            // Split this line into key and value.
-            let (key, value) = match line.split_once('=') {
-                Some((key, value)) => (key, value),
-                None => {
-                    return Err(SetupScriptError::EnvFileParse {
-                        path: env_path.to_owned(),
-                        line: line.to_owned(),
-                    })
-                }
-            };
-
-            // Ban keys starting with `NEXTEST`.
-            if key.starts_with("NEXTEST") {
-                return Err(SetupScriptError::EnvFileReservedKey {
-                    key: key.to_owned(),
-                });
-            }
-
-            env_map.insert(key.to_owned(), value.to_owned());
-        }
-
-        Ok(Self { env_map })
-    }
-
-    #[inline]
-    pub(crate) fn len(&self) -> usize {
-        self.env_map.len()
     }
 }
 
@@ -327,29 +255,40 @@ pub(crate) struct CompiledProfileScripts<State> {
 
 impl CompiledProfileScripts<PreBuildPlatform> {
     pub(super) fn new(
-        graph: &PackageGraph,
+        pcx: &ParseContext<'_>,
         profile_name: &str,
+        index: usize,
         source: &DeserializedProfileScriptConfig,
-        errors: &mut Vec<ConfigParseCompiledDataError>,
+        errors: &mut Vec<ConfigCompileError>,
     ) -> Option<Self> {
         if source.platform.host.is_none()
             && source.platform.target.is_none()
             && source.filter.is_none()
         {
-            errors.push(ConfigParseCompiledDataError {
+            errors.push(ConfigCompileError {
                 profile_name: profile_name.to_owned(),
-                not_specified: true,
-                host_parse_error: None,
-                target_parse_error: None,
-                parse_errors: None,
+                section: ConfigCompileSection::Script(index),
+                kind: ConfigCompileErrorKind::ConstraintsNotSpecified {
+                    // The default filter is not relevant for scripts -- it is a
+                    // configuration value, not a constraint.
+                    default_filter_specified: false,
+                },
             });
             return None;
         }
 
         let host_spec = MaybeTargetSpec::new(source.platform.host.as_deref());
         let target_spec = MaybeTargetSpec::new(source.platform.target.as_deref());
+
         let filter_expr = source.filter.as_ref().map_or(Ok(None), |filter| {
-            Some(FilteringExpr::parse(filter.clone(), graph)).transpose()
+            // TODO: probably want to restrict the set of expressions here via
+            // the `kind` parameter.
+            Some(Filterset::parse(
+                filter.clone(),
+                pcx,
+                FiltersetKind::DefaultFilter,
+            ))
+            .transpose()
         });
 
         match (host_spec, target_spec, filter_expr) {
@@ -367,12 +306,14 @@ impl CompiledProfileScripts<PreBuildPlatform> {
                 let platform_parse_error = maybe_platform_err.err();
                 let parse_errors = maybe_parse_err.err();
 
-                errors.push(ConfigParseCompiledDataError {
+                errors.push(ConfigCompileError {
                     profile_name: profile_name.to_owned(),
-                    not_specified: false,
-                    host_parse_error: host_platform_parse_error,
-                    target_parse_error: platform_parse_error,
-                    parse_errors,
+                    section: ConfigCompileSection::Script(index),
+                    kind: ConfigCompileErrorKind::Parse {
+                        host_parse_error: host_platform_parse_error,
+                        target_parse_error: platform_parse_error,
+                        filter_parse_errors: parse_errors.into_iter().collect(),
+                    },
                 });
                 None
             }
@@ -405,7 +346,7 @@ impl CompiledProfileScripts<PreBuildPlatform> {
 }
 
 impl CompiledProfileScripts<FinalConfig> {
-    pub(super) fn is_enabled(&self, query: &TestQuery<'_>) -> bool {
+    pub(super) fn is_enabled(&self, query: &TestQuery<'_>, cx: &EvalContext<'_>) -> bool {
         if !self.state.host_eval {
             return false;
         }
@@ -417,7 +358,7 @@ impl CompiledProfileScripts<FinalConfig> {
         }
 
         if let Some(expr) = &self.data.expr {
-            expr.matches_test(query)
+            expr.matches_test(query, cx)
         } else {
             true
         }
@@ -467,7 +408,7 @@ impl fmt::Display for ScriptId {
 pub(super) struct ProfileScriptData {
     host_spec: MaybeTargetSpec,
     target_spec: MaybeTargetSpec,
-    expr: Option<FilteringExpr>,
+    expr: Option<Filterset>,
 }
 
 /// Deserialized form of profile-specific script configuration before compilation.
@@ -478,7 +419,7 @@ pub(super) struct DeserializedProfileScriptConfig {
     #[serde(default)]
     pub(super) platform: PlatformStrings,
 
-    /// The filter expression to match against.
+    /// The filterset to match against.
     #[serde(default)]
     filter: Option<String>,
 
@@ -513,6 +454,10 @@ pub struct ScriptConfig {
     /// Whether to capture standard error for this command.
     #[serde(default)]
     pub capture_stderr: bool,
+
+    /// JUnit configuration for this script.
+    #[serde(default)]
+    pub junit: ScriptJunitConfig,
 }
 
 impl ScriptConfig {
@@ -533,6 +478,36 @@ impl ScriptConfig {
     pub fn no_capture(&self) -> bool {
         !(self.capture_stdout && self.capture_stderr)
     }
+}
+
+/// A JUnit override configuration.
+#[derive(Copy, Clone, Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ScriptJunitConfig {
+    /// Whether to store successful output.
+    ///
+    /// Defaults to true.
+    #[serde(default = "default_true")]
+    pub store_success_output: bool,
+
+    /// Whether to store failing output.
+    ///
+    /// Defaults to true.
+    #[serde(default = "default_true")]
+    pub store_failure_output: bool,
+}
+
+impl Default for ScriptJunitConfig {
+    fn default() -> Self {
+        Self {
+            store_success_output: true,
+            store_failure_output: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn deserialize_script_ids<'de, D>(deserializer: D) -> Result<Vec<ScriptId>, D::Error>
@@ -617,11 +592,10 @@ where
 mod tests {
     use super::*;
     use crate::{
-        config::{test_helpers::*, ConfigExperimental, NextestConfig, ToolConfigFile},
-        errors::{ConfigParseErrorKind, UnknownConfigScriptError},
+        config::{ConfigExperimental, NextestConfig, ToolConfigFile, test_helpers::*},
+        errors::{ConfigParseErrorKind, DisplayErrorChain, UnknownConfigScriptError},
     };
     use camino_tempfile::tempdir;
-    use display_error_chain::DisplayErrorChain;
     use indoc::indoc;
     use maplit::btreeset;
     use test_case::test_case;
@@ -674,6 +648,8 @@ mod tests {
         let tool_path = workspace_dir.path().join(".config/my-tool.toml");
         std::fs::write(&tool_path, tool_config_contents).unwrap();
 
+        let pcx = ParseContext::new(&graph);
+
         let tool_config_files = [ToolConfigFile {
             tool: "my-tool".to_owned(),
             config_file: tool_path,
@@ -682,7 +658,7 @@ mod tests {
         // First, check that if the experimental feature isn't enabled, we get an error.
         let nextest_config_error = NextestConfig::from_sources(
             graph.workspace().root(),
-            &graph,
+            &pcx,
             None,
             &tool_config_files,
             &Default::default(),
@@ -692,13 +668,13 @@ mod tests {
             ConfigParseErrorKind::ExperimentalFeatureNotEnabled { feature } => {
                 assert_eq!(*feature, ConfigExperimental::SetupScripts);
             }
-            other => panic!("unexpected error kind: {:?}", other),
+            other => panic!("unexpected error kind: {other:?}"),
         }
 
         // Now, check with the experimental feature enabled.
         let nextest_config_result = NextestConfig::from_sources(
             graph.workspace().root(),
-            &graph,
+            &pcx,
             None,
             &tool_config_files,
             &btreeset! { ConfigExperimental::SetupScripts },
@@ -824,7 +800,7 @@ mod tests {
             [script.'#foo']
             command = "my-command"
         "#},
-        r#"invalid configuration script name: invalid identifier `#foo`"#
+        r"invalid configuration script name: invalid identifier `#foo`"
 
         ; "invalid script name"
     )]
@@ -832,10 +808,11 @@ mod tests {
         let workspace_dir = tempdir().unwrap();
 
         let graph = temp_workspace(workspace_dir.path(), config_contents);
+        let pcx = ParseContext::new(&graph);
 
         let nextest_config_error = NextestConfig::from_sources(
             graph.workspace().root(),
-            &graph,
+            &pcx,
             None,
             &[][..],
             &btreeset! { ConfigExperimental::SetupScripts },
@@ -859,7 +836,7 @@ mod tests {
         "#},
         "default",
         &[MietteJsonReport {
-            message: "at least one of `platform` and `filter` should be specified".to_owned(),
+            message: "at least one of `platform` and `filter` must be specified".to_owned(),
             labels: vec![],
         }]
 
@@ -876,7 +853,7 @@ mod tests {
         "#},
         "default",
         &[MietteJsonReport {
-            message: "at least one of `platform` and `filter` should be specified".to_owned(),
+            message: "at least one of `platform` and `filter` must be specified".to_owned(),
             labels: vec![],
         }]
 
@@ -918,7 +895,7 @@ mod tests {
             ]
         }]
 
-        ; "invalid filter expression"
+        ; "invalid filterset"
     )]
     fn parse_scripts_invalid_compile(
         config_contents: &str,
@@ -929,16 +906,18 @@ mod tests {
 
         let graph = temp_workspace(workspace_dir.path(), config_contents);
 
+        let pcx = ParseContext::new(&graph);
+
         let error = NextestConfig::from_sources(
             graph.workspace().root(),
-            &graph,
+            &pcx,
             None,
             &[][..],
             &btreeset! { ConfigExperimental::SetupScripts },
         )
         .expect_err("config is invalid");
         match error.kind() {
-            ConfigParseErrorKind::CompiledDataParseError(compile_errors) => {
+            ConfigParseErrorKind::CompileErrors(compile_errors) => {
                 assert_eq!(
                     compile_errors.len(),
                     1,
@@ -951,6 +930,7 @@ mod tests {
                 );
                 let handler = miette::JSONReportHandler::new();
                 let reports = error
+                    .kind
                     .reports()
                     .map(|report| {
                         let mut out = String::new();
@@ -968,7 +948,9 @@ mod tests {
                 assert_eq!(&reports, expected_reports, "reports match");
             }
             other => {
-                panic!("for config error {other:?}, expected ConfigParseErrorKind::CompiledDataParseError");
+                panic!(
+                    "for config error {other:?}, expected ConfigParseErrorKind::CompiledDataParseError"
+                );
             }
         }
     }
@@ -989,9 +971,11 @@ mod tests {
 
         let graph = temp_workspace(workspace_dir.path(), config_contents);
 
+        let pcx = ParseContext::new(&graph);
+
         let error = NextestConfig::from_sources(
             graph.workspace().root(),
-            &graph,
+            &pcx,
             None,
             &[][..],
             &btreeset! { ConfigExperimental::SetupScripts },
@@ -1009,7 +993,9 @@ mod tests {
                 }
             }
             other => {
-                panic!("for config error {other:?}, expected ConfigParseErrorKind::InvalidConfigScriptsDefined");
+                panic!(
+                    "for config error {other:?}, expected ConfigParseErrorKind::InvalidConfigScriptsDefined"
+                );
             }
         }
     }
@@ -1039,9 +1025,11 @@ mod tests {
             config_file: tool_path,
         }];
 
+        let pcx = ParseContext::new(&graph);
+
         let error = NextestConfig::from_sources(
             graph.workspace().root(),
-            &graph,
+            &pcx,
             None,
             &tool_config_files,
             &btreeset! { ConfigExperimental::SetupScripts },
@@ -1059,7 +1047,9 @@ mod tests {
                 }
             }
             other => {
-                panic!("for config error {other:?}, expected ConfigParseErrorKind::InvalidConfigScriptsDefinedByTool");
+                panic!(
+                    "for config error {other:?}, expected ConfigParseErrorKind::InvalidConfigScriptsDefinedByTool"
+                );
             }
         }
     }
@@ -1100,9 +1090,11 @@ mod tests {
 
         let graph = temp_workspace(workspace_dir.path(), config_contents);
 
+        let pcx = ParseContext::new(&graph);
+
         let error = NextestConfig::from_sources(
             graph.workspace().root(),
-            &graph,
+            &pcx,
             None,
             &[][..],
             &btreeset! { ConfigExperimental::SetupScripts },
@@ -1142,7 +1134,9 @@ mod tests {
                 }
             }
             other => {
-                panic!("for config error {other:?}, expected ConfigParseErrorKind::UnknownConfigScripts");
+                panic!(
+                    "for config error {other:?}, expected ConfigParseErrorKind::UnknownConfigScripts"
+                );
             }
         }
     }

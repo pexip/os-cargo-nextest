@@ -63,7 +63,7 @@ impl<'de> Deserialize<'de> for TestThreads {
     {
         struct V;
 
-        impl<'de2> serde::de::Visitor<'de2> for V {
+        impl serde::de::Visitor<'_> for V {
             type Value = TestThreads;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -109,9 +109,10 @@ impl<'de> Deserialize<'de> for TestThreads {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{test_helpers::*, NextestConfig};
+    use crate::config::{NextestConfig, test_helpers::*};
     use camino_tempfile::tempdir;
     use indoc::indoc;
+    use nextest_filtering::ParseContext;
     use test_case::test_case;
 
     #[test_case(
@@ -155,9 +156,10 @@ mod tests {
 
         let graph = temp_workspace(workspace_dir.path(), config_contents);
 
+        let pcx = ParseContext::new(&graph);
         let config = NextestConfig::from_sources(
             graph.workspace().root(),
-            &graph,
+            &pcx,
             None,
             [],
             &Default::default(),

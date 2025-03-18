@@ -1,7 +1,7 @@
 // Copyright (c) The nextest Contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use crate::{output::OutputContext, ExpectedError, OutputWriter, Result};
+use crate::{ExpectedError, OutputWriter, Result, output::OutputContext};
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Args, ValueEnum};
 use guppy::graph::PackageGraph;
@@ -14,6 +14,7 @@ use nextest_runner::{
     },
 };
 use std::io::Write;
+use tracing::warn;
 
 #[derive(Debug, Default, Args)]
 #[command(
@@ -101,7 +102,9 @@ impl ReuseBuildOpts {
     // before calling this method)
     pub(crate) fn check_experimental(&self, _output: OutputContext) {
         if std::env::var(Self::EXPERIMENTAL_ENV).is_ok() {
-            log::warn!("build reuse is no longer experimental: NEXTEST_EXPERIMENTAL_REUSE_BUILD does not need to be set");
+            warn!(
+                "build reuse is no longer experimental: NEXTEST_EXPERIMENTAL_REUSE_BUILD does not need to be set"
+            );
         }
     }
 

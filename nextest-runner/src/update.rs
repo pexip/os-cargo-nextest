@@ -5,16 +5,20 @@
 
 use crate::errors::{UpdateError, UpdateVersionParseError};
 use camino::{Utf8Path, Utf8PathBuf};
-use mukti_metadata::{MuktiProject, MuktiReleasesJson, ReleaseLocation, ReleaseStatus};
+use mukti_metadata::{
+    DigestAlgorithm, MuktiProject, MuktiReleasesJson, ReleaseLocation, ReleaseStatus,
+};
 use self_update::{ArchiveKind, Compression, Download, Extract};
 use semver::{Version, VersionReq};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{self, BufWriter},
     str::FromStr,
 };
 use target_spec::Platform;
+use tracing::{debug, info, warn};
 
 /// Update backend using mukti
 #[derive(Clone, Debug)]
@@ -29,7 +33,7 @@ pub struct MuktiBackend {
 impl MuktiBackend {
     /// Fetch releases.
     pub fn fetch_releases(&self, current_version: Version) -> Result<NextestReleases, UpdateError> {
-        log::info!(target: "nextest-runner::update", "checking for self-updates");
+        info!(target: "nextest-runner::update", "checking for self-updates");
         // Is the URL a file that exists on disk? If so, use that.
         let as_path = Utf8Path::new(&self.url);
         let releases_buf = if as_path.exists() {
@@ -54,7 +58,7 @@ impl MuktiBackend {
                 return Err(UpdateError::MuktiProjectNotFound {
                     not_found: self.package_name.clone(),
                     known: releases_json.projects.keys().cloned().collect(),
-                })
+                });
             }
         };
 
@@ -111,7 +115,7 @@ impl NextestReleases {
         perform_setup_fn: impl FnOnce(&Version) -> bool,
     ) -> Result<CheckStatus<'a>, UpdateError> {
         let (version, version_data) = self.get_version_data(version)?;
-        log::debug!(
+        debug!(
             target: "nextest-runner::update",
             "current version is {}, update version is {version}",
             self.current_version,
@@ -129,7 +133,7 @@ impl NextestReleases {
 
         // Look for data for this platform.
         let triple = self.target_triple();
-        log::debug!(target: "nextest-runner::update", "target triple: {triple}");
+        debug!(target: "nextest-runner::update", "target triple: {triple}");
 
         let location = version_data
             .locations
@@ -151,7 +155,7 @@ impl NextestReleases {
 
         let force_disable_setup = version_data
             .metadata
-            .map_or(false, |metadata| metadata.force_disable_setup);
+            .is_some_and(|metadata| metadata.force_disable_setup);
         let perform_setup = !force_disable_setup && perform_setup_fn(version);
 
         Ok(CheckStatus::Success(MuktiUpdateContext {
@@ -199,7 +203,7 @@ impl NextestReleases {
             match serde_json::from_value::<NextestReleaseMetadata>(release_data.metadata.clone()) {
                 Ok(metadata) => Some(metadata),
                 Err(error) => {
-                    log::warn!(
+                    warn!(
                         target: "nextest-runner::update",
                         "failed to parse custom release metadata: {error}",
                     );
@@ -218,7 +222,10 @@ impl NextestReleases {
     }
 
     fn target_triple(&self) -> String {
-        let current = Platform::current().expect("current platform could not be detected");
+        // In this case, use the build target, *not* `rustc -vV` output. This
+        // ensures that e.g. musl binary updates continue to use the musl
+        // target.
+        let current = Platform::build_target().expect("build target could not be detected");
         let triple_str = current.triple_str();
         if triple_str.ends_with("-apple-darwin") {
             // Nextest builds a universal binary for Mac.
@@ -293,7 +300,7 @@ pub struct MuktiUpdateContext<'a> {
     pub perform_setup: bool,
 }
 
-impl<'a> MuktiUpdateContext<'a> {
+impl MuktiUpdateContext<'_> {
     /// Performs the update.
     pub fn do_update(&self) -> Result<(), UpdateError> {
         // This method is adapted from self_update's update_extended.
@@ -308,7 +315,7 @@ impl<'a> MuktiUpdateContext<'a> {
             ))
         })?;
         let tmp_backup_dir_prefix = format!("__{}_backup", self.context.package_name);
-        #[allow(clippy::redundant_clone)]
+        #[expect(clippy::redundant_clone)]
         let tmp_backup_filename = tmp_backup_dir_prefix.clone();
 
         if cfg!(windows) {
@@ -356,7 +363,7 @@ impl<'a> MuktiUpdateContext<'a> {
             .download_to(&mut tmp_archive_buf)
             .map_err(UpdateError::SelfUpdate)?;
 
-        log::debug!(target: "nextest-runner::update", "downloaded to {tmp_archive_path}");
+        debug!(target: "nextest-runner::update", "downloaded to {tmp_archive_path}");
 
         let tmp_archive =
             tmp_archive_buf
@@ -373,6 +380,38 @@ impl<'a> MuktiUpdateContext<'a> {
             })?;
         std::mem::drop(tmp_archive);
 
+        // Verify the checksum of the downloaded file if available.
+        let mut hasher = Sha256::default();
+        // Just read the file into memory for now -- it would be nice to have an
+        // incremental hasher that updates the hash as it's being downloaded,
+        // but it's not critical since our archives are quite small.
+        let mut tmp_archive =
+            fs::File::open(&tmp_archive_path).map_err(|error| UpdateError::TempArchiveRead {
+                archive_path: tmp_archive_path.clone(),
+                error,
+            })?;
+        io::copy(&mut tmp_archive, &mut hasher).map_err(|error| UpdateError::TempArchiveRead {
+            archive_path: tmp_archive_path.clone(),
+            error,
+        })?;
+        let hash = hasher.finalize();
+        let hash_str = hex::encode(hash);
+
+        match self.location.checksums.get(&DigestAlgorithm::SHA256) {
+            Some(checksum) => {
+                if checksum.0 != hash_str {
+                    return Err(UpdateError::ChecksumMismatch {
+                        expected: checksum.0.clone(),
+                        actual: hash_str,
+                    });
+                }
+                debug!(target: "nextest-runner::update", "SHA-256 checksum verified: {hash_str}");
+            }
+            None => {
+                warn!(target: "nextest-runner::update", "unable to verify SHA-256 checksum of downloaded archive ({hash_str})");
+            }
+        }
+
         // Now extract data from this archive.
         Extract::from_source(tmp_archive_path.as_std_path())
             .archive(ArchiveKind::Tar(Some(Compression::Gz)))
@@ -386,7 +425,7 @@ impl<'a> MuktiUpdateContext<'a> {
         // need to make this file executable.
 
         let new_exe = tmp_dir_path.join(self.bin_path_in_archive);
-        log::debug!(target: "nextest-runner::update", "extracted to {new_exe}, replacing existing binary");
+        debug!(target: "nextest-runner::update", "extracted to {new_exe}, replacing existing binary");
 
         let tmp_backup_dir = camino_tempfile::Builder::new()
             .prefix(&tmp_backup_dir_prefix)
@@ -405,7 +444,7 @@ impl<'a> MuktiUpdateContext<'a> {
 
         // Finally, run `cargo nextest self setup` if requested.
         if self.perform_setup {
-            log::info!(target: "nextest-runner::update", "running `cargo nextest self setup`");
+            info!(target: "nextest-runner::update", "running `cargo nextest self setup`");
             let mut cmd = std::process::Command::new(&self.context.bin_install_path);
             cmd.args(["nextest", "self", "setup", "--source", "self-update"]);
             let status = cmd.status().map_err(UpdateError::SelfSetup)?;

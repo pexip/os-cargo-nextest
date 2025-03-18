@@ -144,13 +144,13 @@ where
                 ));
             }
             // Max delay, if specified, can't be zero.
-            if max_delay.map_or(false, |f| f.is_zero()) {
+            if max_delay.is_some_and(|f| f.is_zero()) {
                 return Err(serde::de::Error::custom(
                     "`max-delay` cannot be zero with exponential backoff",
                 ));
             }
             // Max delay can't be less than delay.
-            if max_delay.map_or(false, |max_delay| max_delay < *delay) {
+            if max_delay.is_some_and(|max_delay| max_delay < *delay) {
                 return Err(serde::de::Error::custom(
                     "`max-delay` cannot be less than delay with exponential backoff",
                 ));
@@ -167,8 +167,8 @@ mod tests {
     use super::*;
     use crate::{
         config::{
-            test_helpers::{binary_query, build_platforms, temp_workspace},
             NextestConfig,
+            test_helpers::{binary_query, build_platforms, temp_workspace},
         },
         errors::ConfigParseErrorKind,
     };
@@ -177,7 +177,7 @@ mod tests {
     use config::ConfigError;
     use guppy::graph::cargo::BuildPlatform;
     use indoc::indoc;
-    use nextest_filtering::TestQuery;
+    use nextest_filtering::{ParseContext, TestQuery};
     use test_case::test_case;
 
     #[test]
@@ -205,10 +205,11 @@ mod tests {
         let workspace_dir = tempdir().unwrap();
 
         let graph = temp_workspace(workspace_dir.path(), config_contents);
+        let pcx = ParseContext::new(&graph);
 
         let config = NextestConfig::from_sources(
             graph.workspace().root(),
-            &graph,
+            &pcx,
             None,
             [],
             &Default::default(),
@@ -380,10 +381,11 @@ mod tests {
         let workspace_path: &Utf8Path = workspace_dir.path();
 
         let graph = temp_workspace(workspace_path, config_contents);
+        let pcx = ParseContext::new(&graph);
 
         let config_err = NextestConfig::from_sources(
             graph.workspace().root(),
-            &graph,
+            &pcx,
             None,
             [],
             &Default::default(),
@@ -394,7 +396,9 @@ mod tests {
             ConfigParseErrorKind::DeserializeError(path_error) => match path_error.inner() {
                 ConfigError::Message(message) => message,
                 other => {
-                    panic!("for config error {config_err:?}, expected ConfigError::Message for inner error {other:?}");
+                    panic!(
+                        "for config error {config_err:?}, expected ConfigError::Message for inner error {other:?}"
+                    );
                 }
             },
             other => {
@@ -617,10 +621,11 @@ mod tests {
 
         let graph = temp_workspace(workspace_path, config_contents);
         let package_id = graph.workspace().iter().next().unwrap().id();
+        let pcx = ParseContext::new(&graph);
 
         let config = NextestConfig::from_sources(
             graph.workspace().root(),
-            &graph,
+            &pcx,
             None,
             &[][..],
             &Default::default(),
@@ -631,11 +636,11 @@ mod tests {
             binary_query: binary_query.to_query(),
             test_name: "my_test",
         };
-        let settings_for = config
+        let profile = config
             .profile("ci")
             .expect("ci profile is defined")
-            .apply_build_platforms(&build_platforms())
-            .settings_for(&query);
+            .apply_build_platforms(&build_platforms());
+        let settings_for = profile.settings_for(&query);
         assert_eq!(
             settings_for.retries(),
             retries,

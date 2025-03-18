@@ -98,7 +98,8 @@ pub(crate) struct CargoOptions {
         long,
         value_name = "N",
         group = "cargo-opts",
-        help_heading = "Compilation options"
+        help_heading = "Compilation options",
+        allow_negative_numbers = true
     )]
     build_jobs: Option<String>,
 
@@ -186,7 +187,7 @@ pub(crate) struct CargoOptions {
 
     // NOTE: this does not conflict with reuse build opts (not part of the cargo-opts group) since
     // we let target.runner be specified this way
-    /// Override a configuration value
+    /// Override a Cargo configuration value
     #[arg(long, value_name = "KEY=VALUE", help_heading = "Other Cargo options")]
     pub(crate) config: Vec<String>,
 
@@ -227,7 +228,6 @@ impl<'a> CargoCli<'a> {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn add_arg(&mut self, arg: &'a str) -> &mut Self {
         self.args.push(Cow::Borrowed(arg));
         self
