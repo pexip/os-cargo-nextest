@@ -11,8 +11,9 @@
 
 [package]
 edition = "2021"
+rust-version = "1.70.0"
 name = "test-strategy"
-version = "0.3.1"
+version = "0.4.0"
 authors = ["frozenlib"]
 description = "Procedural macro to easily write higher-order strategies in proptest."
 documentation = "https://docs.rs/test-strategy/"
@@ -30,16 +31,16 @@ repository = "https://github.com/frozenlib/test-strategy"
 proc-macro = true
 
 [dependencies.proc-macro2]
-version = "1.0.55"
+version = "1.0.86"
 
 [dependencies.quote]
-version = "1.0.26"
+version = "1.0.36"
 
 [dependencies.structmeta]
-version = "0.2.0"
+version = "0.3.0"
 
 [dependencies.syn]
-version = "2.0.13"
+version = "2.0.68"
 features = [
     "visit",
     "full",
@@ -47,11 +48,11 @@ features = [
 ]
 
 [dev-dependencies.proptest]
-version = "1.1.0"
+version = "1.5.0"
 
 [dev-dependencies.tokio]
-version = "1.28.1"
+version = "1.38.0"
 features = ["rt-multi-thread"]
 
 [dev-dependencies.trybuild]
-version = "1.0.80"
+version = "1.0.96"

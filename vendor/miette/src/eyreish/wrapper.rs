@@ -9,11 +9,6 @@ use crate as miette;
 #[repr(transparent)]
 pub(crate) struct DisplayError<M>(pub(crate) M);
 
-#[repr(transparent)]
-pub(crate) struct MessageError<M>(pub(crate) M);
-
-pub(crate) struct NoneError;
-
 impl<M> Debug for DisplayError<M>
 where
     M: Display,
@@ -35,6 +30,9 @@ where
 impl<M> StdError for DisplayError<M> where M: Display + 'static {}
 impl<M> Diagnostic for DisplayError<M> where M: Display + 'static {}
 
+#[repr(transparent)]
+pub(crate) struct MessageError<M>(pub(crate) M);
+
 impl<M> Debug for MessageError<M>
 where
     M: Display + Debug,
@@ -55,21 +53,6 @@ where
 
 impl<M> StdError for MessageError<M> where M: Display + Debug + 'static {}
 impl<M> Diagnostic for MessageError<M> where M: Display + Debug + 'static {}
-
-impl Debug for NoneError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Debug::fmt("Option was None", f)
-    }
-}
-
-impl Display for NoneError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Display::fmt("Option was None", f)
-    }
-}
-
-impl StdError for NoneError {}
-impl Diagnostic for NoneError {}
 
 #[repr(transparent)]
 pub(crate) struct BoxedError(pub(crate) Box<dyn Diagnostic + Send + Sync>);
@@ -256,18 +239,6 @@ mod tests {
         }
     }
 
-    #[derive(Error, Debug)]
-    #[error("outer")]
-    struct Outer {
-        pub(crate) errors: Vec<Inner>,
-    }
-
-    impl Diagnostic for Outer {
-        fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn Diagnostic> + 'a>> {
-            Some(Box::new(self.errors.iter().map(|e| e as _)))
-        }
-    }
-
     #[test]
     fn no_override() {
         let inner_source = "hello world";
@@ -295,6 +266,18 @@ mod tests {
     #[test]
     #[cfg(feature = "fancy")]
     fn two_source_codes() {
+        #[derive(Error, Debug)]
+        #[error("outer")]
+        struct Outer {
+            pub(crate) errors: Vec<Inner>,
+        }
+
+        impl Diagnostic for Outer {
+            fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn Diagnostic> + 'a>> {
+                Some(Box::new(self.errors.iter().map(|e| e as _)))
+            }
+        }
+
         let inner_source = "hello world";
         let outer_source = "abc";
 

@@ -56,6 +56,10 @@ pub struct Builder {
     /// Any scheduled times exceeding this duration will be clamped to this
     /// value. Higher values will result in more memory usage.
     pub(super) scheduled_duration_max: Duration,
+
+    /// Whether to enable the grpc-web support.
+    #[cfg(feature = "grpc-web")]
+    enable_grpc_web: bool,
 }
 
 impl Default for Builder {
@@ -71,6 +75,8 @@ impl Default for Builder {
             recording_path: None,
             filter_env_var: "RUST_LOG".to_string(),
             self_trace: false,
+            #[cfg(feature = "grpc-web")]
+            enable_grpc_web: false,
         }
     }
 }
@@ -268,6 +274,28 @@ impl Builder {
         Self { self_trace, ..self }
     }
 
+    /// Sets whether to enable the grpc-web support.
+    ///
+    /// By default, this is `false`. If enabled, the console subscriber will
+    /// serve the gRPC-Web protocol in addition to the standard gRPC protocol.
+    /// This is useful for serving the console subscriber to web clients.
+    /// Please be aware that the current default server port is set to 6669.
+    /// However, certain browsers may restrict this port due to security reasons.
+    /// If you encounter issues with this, consider changing the port to an
+    /// alternative one that is not commonly blocked by browsers.
+    ///
+    /// [`serve_with_grpc_web`] is used to provide more advanced configuration
+    /// for the gRPC-Web server.
+    ///
+    /// [`serve_with_grpc_web`]: crate::Server::serve_with_grpc_web
+    #[cfg(feature = "grpc-web")]
+    pub fn enable_grpc_web(self, enable_grpc_web: bool) -> Self {
+        Self {
+            enable_grpc_web,
+            ..self
+        }
+    }
+
     /// Completes the builder, returning a [`ConsoleLayer`] and [`Server`] task.
     pub fn build(self) -> (ConsoleLayer, Server) {
         ConsoleLayer::build(self)
@@ -303,6 +331,10 @@ impl Builder {
 
         if let Ok(path) = std::env::var("TOKIO_CONSOLE_RECORD_PATH") {
             self.recording_path = Some(path.into());
+        }
+
+        if let Some(capacity) = usize_from_env("TOKIO_CONSOLE_BUFFER_CAPACITY") {
+            self.event_buffer_capacity = capacity;
         }
 
         self
@@ -481,6 +513,8 @@ impl Builder {
         }
 
         let self_trace = self.self_trace;
+        #[cfg(feature = "grpc-web")]
+        let enable_grpc_web = self.enable_grpc_web;
 
         let (layer, server) = self.build();
         let filter =
@@ -501,8 +535,16 @@ impl Builder {
                     .enable_time()
                     .build()
                     .expect("console subscriber runtime initialization failed");
-
                 runtime.block_on(async move {
+                    #[cfg(feature = "grpc-web")]
+                    if enable_grpc_web {
+                        server
+                            .serve_with_grpc_web(tonic::transport::Server::builder())
+                            .await
+                            .expect("console subscriber server failed");
+                        return;
+                    }
+
                     server
                         .serve()
                         .await
@@ -723,6 +765,17 @@ fn duration_from_env(var_name: &str) -> Option<Duration> {
         Ok(dur) => Some(dur.into()),
         Err(e) => panic!(
             "failed to parse a duration from `{}={:?}`: {}",
+            var_name, var, e
+        ),
+    }
+}
+
+fn usize_from_env(var_name: &str) -> Option<usize> {
+    let var = std::env::var(var_name).ok()?;
+    match var.parse::<usize>() {
+        Ok(num) => Some(num),
+        Err(e) => panic!(
+            "failed to parse a usize from `{}={:?}`: {}",
             var_name, var, e
         ),
     }

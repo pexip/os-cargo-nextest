@@ -2,10 +2,10 @@
 
 use std::io::{IoSlice, Read, Seek, SeekFrom, Write};
 
-use super::{gather_signature_data, GatherSignatureDataError};
-use crate::constants::{SignatureCountLeInt, BUF_LIMIT, HEADER_SIZE};
-use crate::sign_unsign_zip::{copy_zip, CopyZipError};
-use crate::{Prehash, SigningKey, SIGNATURE_LENGTH};
+use super::{GatherSignatureDataError, gather_signature_data};
+use crate::constants::{BUF_LIMIT, HEADER_SIZE, SignatureCountLeInt};
+use crate::sign_unsign_zip::{CopyZipError, copy_zip};
+use crate::{Prehash, SIGNATURE_LENGTH, SigningKey};
 
 crate::Error! {
     /// An error returned by [`copy_and_sign_zip()`]
@@ -70,7 +70,7 @@ where
     while padding_to_write > 0 {
         const PADDING: &[u8; 512] = &[0; 512];
         let result = if padding_to_write > PADDING.len() {
-            let num_slices = ((padding_to_write + PADDING.len() - 1) / PADDING.len()).min(128);
+            let num_slices = padding_to_write.div_ceil(PADDING.len()).min(128);
             let mut slices = vec![IoSlice::new(PADDING); num_slices];
             slices[num_slices - 1] = IoSlice::new(&PADDING[..padding_to_write % PADDING.len()]);
             output.write_vectored(&slices)

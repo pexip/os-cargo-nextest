@@ -127,7 +127,7 @@ impl Error {
         let mut source = self.source();
 
         while let Some(err) = source {
-            if let Some(hyper_err) = err.downcast_ref::<hyper::Error>() {
+            if let Some(hyper_err) = err.downcast_ref::<hyper_util::client::legacy::Error>() {
                 if hyper_err.is_connect() {
                     return true;
                 }
@@ -165,6 +165,19 @@ impl Error {
     }
 }
 
+/// Converts from external types to reqwest's
+/// internal equivalents.
+///
+/// Currently only is used for `tower::timeout::error::Elapsed`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn cast_to_internal_error(error: BoxError) -> BoxError {
+    if error.is::<tower::timeout::error::Elapsed>() {
+        Box::new(crate::error::TimedOut) as BoxError
+    } else {
+        error
+    }
+}
+
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut builder = f.debug_struct("reqwest::Error");
@@ -172,7 +185,7 @@ impl fmt::Debug for Error {
         builder.field("kind", &self.inner.kind);
 
         if let Some(ref url) = self.inner.url {
-            builder.field("url", url);
+            builder.field("url", &url.as_str());
         }
         if let Some(ref source) = self.inner.source {
             builder.field("source", source);
@@ -204,10 +217,6 @@ impl fmt::Display for Error {
 
         if let Some(url) = &self.inner.url {
             write!(f, " for url ({url})")?;
-        }
-
-        if let Some(e) = &self.inner.source {
-            write!(f, ": {e}")?;
         }
 
         Ok(())
@@ -291,9 +300,15 @@ pub(crate) fn upgrade<E: Into<BoxError>>(e: E) -> Error {
 
 // io::Error helpers
 
-#[allow(unused)]
-pub(crate) fn into_io(e: Error) -> io::Error {
-    e.into_io()
+#[cfg(any(
+    feature = "gzip",
+    feature = "zstd",
+    feature = "brotli",
+    feature = "deflate",
+    feature = "blocking",
+))]
+pub(crate) fn into_io(e: BoxError) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, e)
 }
 
 #[allow(unused)]

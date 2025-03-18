@@ -1,8 +1,9 @@
 use windows::Win32::System::{
     JobObjects::{
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_AFFINITY,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PRIORITY_CLASS,
-        JOB_OBJECT_LIMIT_SCHEDULING_CLASS, JOB_OBJECT_LIMIT_WORKINGSET,
+        JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOB_OBJECT_LIMIT_PRIORITY_CLASS, JOB_OBJECT_LIMIT_SCHEDULING_CLASS,
+        JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_WORKINGSET,
     },
     Threading::{
         ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS,
@@ -57,6 +58,22 @@ impl ExtendedLimitInfo {
     /// to the job **the current process will terminate** if it's assign to that job.
     pub fn limit_kill_on_job_close(&mut self) -> &mut Self {
         self.0.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        self
+    }
+
+    /// If any process associated with the job creates a child process using
+    /// this flag, the child process is not associated with the job.
+    pub fn limit_breakaway_ok(&mut self) -> &mut Self {
+        self.0.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+
+        self
+    }
+
+    /// Allows any process associated with the job to create child processes that
+    /// are not associated with the job.
+    pub fn limit_silent_breakaway_ok(&mut self) -> &mut Self {
+        self.0.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
 
         self
     }

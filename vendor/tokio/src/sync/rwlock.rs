@@ -21,7 +21,7 @@ pub(crate) use write_guard::RwLockWriteGuard;
 pub(crate) use write_guard_mapped::RwLockMappedWriteGuard;
 
 #[cfg(not(loom))]
-const MAX_READS: u32 = std::u32::MAX >> 3;
+const MAX_READS: u32 = u32::MAX >> 3;
 
 #[cfg(loom)]
 const MAX_READS: u32 = 10;
@@ -274,8 +274,7 @@ impl<T: ?Sized> RwLock<T> {
     {
         assert!(
             max_reads <= MAX_READS,
-            "a RwLock may not be created with more than {} readers",
-            MAX_READS
+            "a RwLock may not be created with more than {MAX_READS} readers"
         );
 
         #[cfg(all(tokio_unstable, feature = "tracing"))]

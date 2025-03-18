@@ -2,11 +2,11 @@
 
 use std::io::{Read, Seek};
 
-use super::{find_match, read_signatures, NoMatch, ReadSignaturesError, VerifyingKey};
+use super::{NoMatch, ReadSignaturesError, VerifyingKey, find_match, read_signatures};
 use crate::{Prehash, Signature};
 
 crate::Error! {
-    /// An error retuned by [`verify_zip()`]
+    /// An error returned by [`verify_zip()`]
     pub struct VerifyZipError(Error) {
         #[error("could not read input")]
         InputRead(#[source] std::io::Error),

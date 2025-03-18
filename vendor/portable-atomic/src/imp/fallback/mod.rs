@@ -1,21 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-// Fallback implementation using global locks.
-//
-// This implementation uses seqlock for global locks.
-//
-// This is basically based on global locks in crossbeam-utils's `AtomicCell`,
-// but seqlock is implemented in a way that does not depend on UB
-// (see comments in optimistic_read method in atomic! macro for details).
-//
-// Note that we cannot use a lock per atomic type, since the in-memory representation of the atomic
-// type and the value type must be the same.
+/*
+Fallback implementation using global locks.
+
+This implementation uses seqlock for global locks.
+
+This is basically based on global locks in crossbeam-utils's `AtomicCell`,
+but seqlock is implemented in a way that does not depend on UB
+(see comments in optimistic_read method in atomic! macro for details).
+
+Note that we cannot use a lock per atomic type, since the in-memory representation of the atomic
+type and the value type must be the same.
+*/
 
 #![cfg_attr(
     any(
         all(
             target_arch = "x86_64",
-            not(portable_atomic_no_cmpxchg16b_target_feature),
             not(portable_atomic_no_outline_atomics),
             not(any(target_env = "sgx", miri)),
         ),
@@ -23,14 +24,16 @@
             target_arch = "powerpc64",
             feature = "fallback",
             not(portable_atomic_no_outline_atomics),
-            portable_atomic_outline_atomics, // TODO(powerpc64): currently disabled by default
             any(
                 all(
                     target_os = "linux",
                     any(
-                        target_env = "gnu",
                         all(
-                            any(target_env = "musl", target_env = "ohos"),
+                            target_env = "gnu",
+                            any(target_endian = "little", not(target_feature = "crt-static")),
+                        ),
+                        all(
+                            any(target_env = "musl", target_env = "ohos", target_env = "uclibc"),
                             not(target_feature = "crt-static"),
                         ),
                         portable_atomic_outline_atomics,
@@ -38,12 +41,43 @@
                 ),
                 target_os = "android",
                 target_os = "freebsd",
+                target_os = "openbsd",
             ),
             not(any(miri, portable_atomic_sanitize_thread)),
         ),
         all(
-            target_arch = "arm",
+            target_arch = "riscv32",
+            not(any(miri, portable_atomic_sanitize_thread)),
             not(portable_atomic_no_asm),
+            any(
+                target_feature = "experimental-zacas",
+                portable_atomic_target_feature = "experimental-zacas",
+                all(
+                    feature = "fallback",
+                    not(portable_atomic_no_outline_atomics),
+                    any(test, portable_atomic_outline_atomics), // TODO(riscv): currently disabled by default
+                    any(target_os = "linux", target_os = "android"),
+                ),
+            ),
+        ),
+        all(
+            target_arch = "riscv64",
+            not(portable_atomic_no_asm),
+            any(
+                target_feature = "experimental-zacas",
+                portable_atomic_target_feature = "experimental-zacas",
+                all(
+                    feature = "fallback",
+                    not(portable_atomic_no_outline_atomics),
+                    any(test, portable_atomic_outline_atomics), // TODO(riscv): currently disabled by default
+                    any(target_os = "linux", target_os = "android"),
+                    not(any(miri, portable_atomic_sanitize_thread)),
+                ),
+            ),
+        ),
+        all(
+            target_arch = "arm",
+            any(not(portable_atomic_no_asm), portable_atomic_unstable_asm),
             any(target_os = "linux", target_os = "android"),
             not(portable_atomic_no_outline_atomics),
         ),
@@ -62,7 +96,7 @@ pub(crate) mod utils;
 // counter will not be increased that fast.
 //
 // Some 64-bit architectures have ABI with 32-bit pointer width (e.g., x86_64 X32 ABI,
-// aarch64 ILP32 ABI, mips64 N32 ABI). On those targets, AtomicU64 is available and fast,
+// AArch64 ILP32 ABI, mips64 N32 ABI). On those targets, AtomicU64 is available and fast,
 // so use it to implement normal sequence lock.
 cfg_has_fast_atomic_64! {
     mod seq_lock;
@@ -74,13 +108,15 @@ cfg_no_fast_atomic_64! {
 
 use core::{cell::UnsafeCell, mem, sync::atomic::Ordering};
 
-use seq_lock::{SeqLock, SeqLockWriteGuard};
-use utils::CachePadded;
+use self::{
+    seq_lock::{SeqLock, SeqLockWriteGuard},
+    utils::CachePadded,
+};
 
 // Some 64-bit architectures have ABI with 32-bit pointer width (e.g., x86_64 X32 ABI,
-// aarch64 ILP32 ABI, mips64 N32 ABI). On those targets, AtomicU64 is fast,
+// AArch64 ILP32 ABI, mips64 N32 ABI). On those targets, AtomicU64 is fast,
 // so use it to reduce chunks of byte-wise atomic memcpy.
-use seq_lock::{AtomicChunk, Chunk};
+use self::seq_lock::{AtomicChunk, Chunk};
 
 // Adapted from https://github.com/crossbeam-rs/crossbeam/blob/crossbeam-utils-0.8.7/crossbeam-utils/src/atomic/atomic_cell.rs#L969-L1016.
 #[inline]
@@ -92,7 +128,6 @@ fn lock(addr: usize) -> &'static SeqLock {
     // crossbeam-utils 0.8.7 uses 97 here but does not use CachePadded,
     // so the actual concurrency level will be smaller.
     const LEN: usize = 67;
-    #[allow(clippy::declare_interior_mutable_const)]
     const L: CachePadded<SeqLock> = CachePadded::new(SeqLock::new());
     static LOCKS: [CachePadded<SeqLock>; LEN] = [
         L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L,
@@ -191,24 +226,9 @@ macro_rules! atomic {
 
             #[inline]
             pub(crate) fn is_lock_free() -> bool {
-                Self::is_always_lock_free()
+                Self::IS_ALWAYS_LOCK_FREE
             }
-            #[inline]
-            pub(crate) const fn is_always_lock_free() -> bool {
-                false
-            }
-
-            #[inline]
-            pub(crate) fn get_mut(&mut self) -> &mut $int_type {
-                // SAFETY: the mutable reference guarantees unique ownership.
-                // (UnsafeCell::get_mut requires Rust 1.50)
-                unsafe { &mut *self.v.get() }
-            }
-
-            #[inline]
-            pub(crate) fn into_inner(self) -> $int_type {
-                self.v.into_inner()
-            }
+            pub(crate) const IS_ALWAYS_LOCK_FREE: bool = false;
 
             #[inline]
             #[cfg_attr(all(debug_assertions, not(portable_atomic_no_track_caller)), track_caller)]
@@ -382,7 +402,21 @@ macro_rules! atomic {
 #[cfg_attr(portable_atomic_no_cfg_target_has_atomic, cfg(any(test, portable_atomic_no_atomic_64)))]
 #[cfg_attr(
     not(portable_atomic_no_cfg_target_has_atomic),
-    cfg(any(test, not(target_has_atomic = "64")))
+    cfg(any(
+        test,
+        not(any(
+            target_has_atomic = "64",
+            all(
+                target_arch = "riscv32",
+                not(any(miri, portable_atomic_sanitize_thread)),
+                not(portable_atomic_no_asm),
+                any(
+                    target_feature = "experimental-zacas",
+                    portable_atomic_target_feature = "experimental-zacas",
+                ),
+            ),
+        ))
+    ))
 )]
 cfg_no_fast_atomic_64! {
     atomic!(AtomicI64, i64, 8);

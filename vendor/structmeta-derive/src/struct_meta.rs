@@ -24,10 +24,10 @@ pub fn derive_struct_meta(input: DeriveInput) -> Result<TokenStream> {
         let body = ps.build();
         impl_trait_result(
             &input,
-            &parse_quote!(::syn::parse::Parse),
+            &parse_quote!(::structmeta::helpers::exports::syn::parse::Parse),
             &[],
             quote! {
-                fn parse(input: ::syn::parse::ParseStream<'_>) -> ::syn::Result<Self> {
+                fn parse(input: ::structmeta::helpers::exports::syn::parse::ParseStream<'_>) -> ::structmeta::helpers::exports::syn::Result<Self> {
                     #body
                 }
             },
@@ -115,9 +115,9 @@ impl<'a> Params<'a> {
                 );
                 ts.extend(quote! {
                     if input.is_empty () {
-                        return Err(::syn::Error::new(input.span(), #msg));
+                        return Err(::structmeta::helpers::exports::syn::Error::new(input.span(), #msg));
                     }
-                    input.parse::<::syn::Token![,]>()?;
+                    input.parse::<::structmeta::helpers::exports::syn::Token![,]>()?;
                 });
             }
             is_next = true;
@@ -213,7 +213,7 @@ impl<'a> Params<'a> {
             let mut named_used = false;
             while !input.is_empty() {
                 if is_next {
-                    input.parse::<::syn::Token![,]>()?;
+                    input.parse::<::structmeta::helpers::exports::syn::Token![,]>()?;
                     if input.is_empty() {
                         break;
                     }
@@ -400,7 +400,7 @@ impl<'a> NamedParam<'a> {
         quote_spanned! { span=>
             ::structmeta::helpers::NameIndex::#var(Ok(#index)) => {
                 if #temp_ident.is_some() {
-                    return Err(::syn::Error::new(span, #msg));
+                    return Err(::structmeta::helpers::exports::syn::Error::new(span, #msg));
                 }
                 #temp_ident = Some(#expr);
             }
@@ -419,11 +419,11 @@ impl<'a> NamedParam<'a> {
                 NamedParamType::Bool => quote!(#temp_ident.is_some()),
                 NamedParamType::Value { .. } | NamedParamType::NameValue { .. } => {
                     let msg = format!("missing argument `{} = ...`", self.name);
-                    quote!(#temp_ident.ok_or_else(|| ::syn::Error::new(::proc_macro2::Span::call_site(), #msg))?)
+                    quote!(#temp_ident.ok_or_else(|| ::structmeta::helpers::exports::syn::Error::new(::structmeta::helpers::exports::proc_macro2::Span::call_site(), #msg))?)
                 }
                 NamedParamType::NameArgs { .. } => {
                     let msg = format!("missing argument `{}(...)`", self.name);
-                    quote!(#temp_ident.ok_or_else(|| ::syn::Error::new(::proc_macro2::Span::call_site(), #msg))?)
+                    quote!(#temp_ident.ok_or_else(|| ::structmeta::helpers::exports::syn::Error::new(::structmeta::helpers::exports::proc_macro2::Span::call_site(), #msg))?)
                 }
             }
         };
@@ -443,7 +443,7 @@ impl<'a> RestParam<'a> {
         quote_spanned! { span=>
             ::structmeta::helpers::NameIndex::#var(Err(name)) => {
                 if #temp_ident.insert(name.to_string(), #expr).is_some() {
-                    return Err(::syn::Error::new(span, format!("parameter `{}` specified more than once", name)));
+                    return Err(::structmeta::helpers::exports::syn::Error::new(span, format!("parameter `{}` specified more than once", name)));
                 }
             }
         }
@@ -634,6 +634,7 @@ enum NamedParamType<'a> {
     },
     NameValue {
         ty: &'a Type,
+        is_option: bool,
     },
     NameArgs {
         ty: &'a Type,
@@ -648,8 +649,13 @@ impl<'a> NamedParamType<'a> {
             Self::Bool
         } else if may_flag && is_flag(ty) {
             Self::Flag
-        } else if let Some(ty) = get_name_value_element(ty) {
-            Self::NameValue { ty }
+        } else if let Some(mut ty) = get_name_value_element(ty) {
+            let mut is_option = false;
+            if let Some(e) = get_option_element(ty) {
+                is_option = true;
+                ty = e;
+            }
+            Self::NameValue { ty, is_option }
         } else if let Some(mut ty) = get_name_args_element(ty) {
             let mut is_option = false;
             if let Some(e) = get_option_element(ty) {
@@ -679,8 +685,9 @@ impl<'a> NamedParamType<'a> {
     fn is_flag(&self) -> bool {
         match self {
             NamedParamType::Bool | NamedParamType::Flag => true,
-            NamedParamType::Value { .. } | NamedParamType::NameValue { .. } => false,
-            NamedParamType::NameArgs { is_option, .. } => *is_option,
+            NamedParamType::Value { .. } => false,
+            NamedParamType::NameValue { is_option, .. }
+            | NamedParamType::NameArgs { is_option, .. } => *is_option,
         }
     }
     fn is_name_value(&self) -> bool {
@@ -709,8 +716,18 @@ impl<'a> NamedParamType<'a> {
                     build_parse_expr(ty, span)
                 }
             }
-            NamedParamType::NameValue { ty } => {
-                quote!(::structmeta::NameValue { name_span : span, value: input.parse::<#ty>()? })
+            NamedParamType::NameValue { ty, is_option } => {
+                let value = if kind == ArgKind::Flag && *is_option {
+                    quote!(None)
+                } else {
+                    let value = build_parse_expr(ty, span);
+                    if *is_option {
+                        quote!(Some(#value))
+                    } else {
+                        value
+                    }
+                };
+                quote!(::structmeta::NameValue { name_span : span, value: #value })
             }
             NamedParamType::NameArgs {
                 ty,
@@ -738,14 +755,14 @@ fn build_parse_expr(ty: &Type, span: Span) -> TokenStream {
 }
 fn build_parse_expr_name_args(ty: &Type, is_vec: bool, span: Span) -> TokenStream {
     let value = if is_vec {
-        quote_spanned!(span=> ::syn::punctuated::Punctuated::<#ty, ::syn::Token![,]>::parse_terminated(&content)?.into_iter().collect())
+        quote_spanned!(span=> ::structmeta::helpers::exports::syn::punctuated::Punctuated::<#ty, ::structmeta::helpers::exports::syn::Token![,]>::parse_terminated(&content)?.into_iter().collect())
     } else {
         quote_spanned!(span=> content.parse::<#ty>()?)
     };
     quote! {
         {
             let content;
-            ::syn::parenthesized!(content in input);
+            ::structmeta::helpers::exports::syn::parenthesized!(content in input);
             #value
         }
     }

@@ -42,7 +42,6 @@ fn client() {
     assert!(rc.status.success());
 }
 
-#[cfg(feature = "acceptor")]
 #[test]
 fn server() {
     let mut srv = server_command()
@@ -61,6 +60,8 @@ fn server() {
         .expect("cannot run curl");
 
     srv.kill().unwrap();
+    srv.wait()
+        .expect("failed to wait on server process");
 
     if !output.status.success() {
         let version_stdout = Command::new("curl")
@@ -92,6 +93,8 @@ fn custom_ca_store() {
         .expect("cannot run client example");
 
     srv.kill().unwrap();
+    srv.wait()
+        .expect("failed to wait on server process");
 
     if !rc.status.success() {
         assert_eq!(String::from_utf8_lossy(&rc.stdout), "");

@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::{
+    DependencyKind, Error,
     graph::{
+        DependencyDirection, PackageGraph, PackageIx, PackageLink, PackageSet,
         cargo::{
             CargoIntermediateSet, CargoOptions, CargoResolverVersion, CargoSet, InitialsPlatform,
         },
         feature::{ConditionalLink, FeatureLabel, FeatureQuery, FeatureSet, StandardFeatures},
-        DependencyDirection, PackageGraph, PackageIx, PackageLink, PackageSet,
     },
     platform::{EnabledTernary, PlatformSpec},
     sorted_set::SortedSet,
-    DependencyKind, Error,
 };
 use fixedbitset::FixedBitSet;
 use petgraph::{prelude::*, visit::VisitMap};
@@ -46,7 +46,10 @@ impl<'a> CargoSetBuildState<'a> {
                 let avoid_dev_deps = !self.opts.include_dev;
                 self.new_v1(initials, features_only, avoid_dev_deps)
             }
-            CargoResolverVersion::V2 => self.new_v2(initials, features_only),
+            // V2 and V3 do the same feature resolution.
+            CargoResolverVersion::V2 | CargoResolverVersion::V3 => {
+                self.new_v2(initials, features_only)
+            }
         }
     }
 
@@ -57,7 +60,7 @@ impl<'a> CargoSetBuildState<'a> {
                 let avoid_dev_deps = !self.opts.include_dev;
                 self.new_v1_intermediate(query, avoid_dev_deps)
             }
-            CargoResolverVersion::V2 => self.new_v2_intermediate(query),
+            CargoResolverVersion::V2 | CargoResolverVersion::V3 => self.new_v2_intermediate(query),
         }
     }
 
@@ -403,7 +406,26 @@ impl<'a> CargoSetBuildState<'a> {
             let proc_macro_redirect = follow_target && to.package().is_proc_macro();
 
             // Build dependencies are evaluated against the host platform.
-            let build_dep_redirect = is_enabled(&link, DependencyKind::Build, host_platform);
+            let build_dep_redirect = {
+                // If this is a dependency like:
+                //
+                // ```
+                // [build-dependencies]
+                // cc = { version = "1.0", optional = true }
+                //
+                // [features]
+                // bundled = ["cc"]
+                // ```
+                //
+                // Then, there is an implicit named feature here called "cc" on the target platform,
+                // which enables the optional dependency "cc". But this does not mean that this
+                // package itself is built on the host platform!
+                //
+                // Detect this situation by ensuring that the package ID of the `from` and `to`
+                // nodes are different.
+                from.package_id() != to.package_id()
+                    && is_enabled(&link, DependencyKind::Build, host_platform)
+            };
 
             // Finally, process what needs to be done.
             if build_dep_redirect || proc_macro_redirect {

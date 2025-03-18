@@ -23,7 +23,7 @@ optional features, so your `Cargo.toml` could look like this:
 
 ```toml
 [dependencies]
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -53,13 +53,14 @@ On Linux:
 
 - OpenSSL with headers. See https://docs.rs/openssl for supported versions
   and more details. Alternatively you can enable the `native-tls-vendored`
-  feature to compile a copy of OpenSSL.
+  feature to compile a copy of OpenSSL. Or, you can use [rustls](https://github.com/rustls/rustls)
+  via `rustls-tls` or other `rustls-tls-*` features.
 
 On Windows and macOS:
 
 - Nothing.
 
-Reqwest uses [rust-native-tls](https://github.com/sfackler/rust-native-tls),
+By default, Reqwest uses [rust-native-tls](https://github.com/sfackler/rust-native-tls),
 which will use the operating system TLS framework if available, meaning Windows
 and macOS. On Linux, it will use the available OpenSSL or fail to build if
 not found.

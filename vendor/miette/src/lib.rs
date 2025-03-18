@@ -1,5 +1,6 @@
 #![deny(missing_docs, missing_debug_implementations, nonstandard_style)]
 #![warn(unreachable_pub, rust_2018_idioms)]
+#![allow(unexpected_cfgs)]
 //! You run miette? You run her code like the software? Oh. Oh! Error code for
 //! coder! Error code for One Thousand Lines!
 //!
@@ -27,9 +28,9 @@
 //! " />
 //!
 //! > **NOTE: You must enable the `"fancy"` crate feature to get fancy report
-//! output like in the screenshots above.** You should only do this in your
-//! toplevel crate, as the fancy feature pulls in a number of dependencies that
-//! libraries and such might not want.
+//! > output like in the screenshots above.** You should only do this in your
+//! > toplevel crate, as the fancy feature pulls in a number of dependencies that
+//! > libraries and such might not want.
 //!
 //! ## Table of Contents <!-- omit in toc -->
 //!
@@ -99,7 +100,7 @@
 //!
 //! `thiserror` is a great way to define them, and plays nicely with `miette`!
 //! */
-//! use miette::{Diagnostic, SourceSpan};
+//! use miette::{Diagnostic, NamedSource, SourceSpan};
 //! use thiserror::Error;
 //!
 //! #[derive(Error, Debug, Diagnostic)]
@@ -126,12 +127,11 @@
 //! throughout your app (but NOT your libraries! Those should always return
 //! concrete types!).
 //! */
-//! use miette::{NamedSource, Result};
+//! use miette::Result;
 //! fn this_fails() -> Result<()> {
 //!     // You can use plain strings as a `Source`, or anything that implements
 //!     // the one-method `Source` trait.
 //!     let src = "source\n  text\n    here".to_string();
-//!     let len = src.len();
 //!
 //!     Err(MyBad {
 //!         src: NamedSource::new("bad_file.rs", src),
@@ -161,17 +161,20 @@
 //! <img src="https://raw.githubusercontent.com/zkat/miette/main/images/single-line-example.png" alt="
 //! Narratable printout:
 //! \
-//! Error: Types mismatched for operation.
-//!     Diagnostic severity: error
-//! Begin snippet starting at line 1, column 1
+//! diagnostic error code: oops::my::bad (link)
+//! Error: oops!
 //! \
-//! snippet line 1: 3 + &quot;5&quot;
-//!     label starting at line 1, column 1: int
-//!     label starting at line 1, column 1: doesn't support these values.
-//!     label starting at line 1, column 1: string
-//! diagnostic help: Change int or string to be the right types and try again.
-//! diagnostic code: nu::parser::unsupported_operation
-//! For more details, see https://docs.rs/nu-parser/0.1.0/nu-parser/enum.ParseError.html#variant.UnsupportedOperation">
+//! Begin snippet for bad_file.rs starting
+//! at line 2, column 3
+//! \
+//! snippet line 1: source
+//! \
+//! snippet line 2:  text
+//!     highlight starting at line 1, column 3: This bit here
+//! \
+//! snippet line 3: here
+//! \
+//! diagnostic help: try doing it better next time?">
 //!
 //! ## Using
 //!
@@ -241,7 +244,7 @@
 //! use semver::Version;
 //!
 //! pub fn some_tool() -> Result<Version> {
-//!     Ok("1.2.x".parse().into_diagnostic()?)
+//!     "1.2.x".parse().into_diagnostic()
 //! }
 //! ```
 //!
@@ -256,24 +259,24 @@
 //! use semver::Version;
 //!
 //! pub fn some_tool() -> Result<Version> {
-//!     Ok("1.2.x"
+//!     "1.2.x"
 //!         .parse()
 //!         .into_diagnostic()
-//!         .wrap_err("Parsing this tool's semver version failed.")?)
+//!         .wrap_err("Parsing this tool's semver version failed.")
 //! }
 //! ```
 //!
-//! To construct your own simple adhoc error use the [miette!] macro:
+//! To construct your own simple adhoc error use the [`miette!`] macro:
 //! ```rust
 //! // my_app/lib/my_internal_file.rs
-//! use miette::{miette, IntoDiagnostic, Result, WrapErr};
+//! use miette::{miette, Result};
 //! use semver::Version;
 //!
 //! pub fn some_tool() -> Result<Version> {
 //!     let version = "1.2.x";
-//!     Ok(version
+//!     version
 //!         .parse()
-//!         .map_err(|_| miette!("Invalid version {}", version))?)
+//!         .map_err(|_| miette!("Invalid version {}", version))
 //! }
 //! ```
 //! There are also similar [bail!] and [ensure!] macros.
@@ -285,9 +288,9 @@
 //! automatically.
 //!
 //! > **NOTE:** You must enable the `"fancy"` crate feature to get fancy report
-//! output like in the screenshots here.** You should only do this in your
-//! toplevel crate, as the fancy feature pulls in a number of dependencies that
-//! libraries and such might not want.
+//! > output like in the screenshots here.** You should only do this in your
+//! > toplevel crate, as the fancy feature pulls in a number of dependencies that
+//! > libraries and such might not want.
 //!
 //! ```rust
 //! use miette::{IntoDiagnostic, Result};
@@ -632,7 +635,6 @@
 //!     )
 //! }))
 //!
-//! # .unwrap()
 //! ```
 //!
 //! See the docs for [`MietteHandlerOpts`] for more details on what you can
@@ -643,8 +645,8 @@
 //! If you...
 //! - ...don't know all the possible errors upfront
 //! - ...need to serialize/deserialize errors
-//! then you may want to use [`miette!`], [`diagnostic!`] macros or
-//! [`MietteDiagnostic`] directly to create diagnostic on the fly.
+//!   then you may want to use [`miette!`], [`diagnostic!`] macros or
+//!   [`MietteDiagnostic`] directly to create diagnostic on the fly.
 //!
 //! ```rust,ignore
 //! # use miette::{miette, LabeledSpan, Report};
@@ -672,12 +674,12 @@
 //! field of your [`Diagnostic`].
 //!
 //! Syntax detection with [`syntect`] is handled by checking 2 methods on the [`SpanContents`] trait, in order:
-//! * [language()](SpanContents::language) - Provides the name of the language
+//! * [`language()`](SpanContents::language) - Provides the name of the language
 //!   as a string. For example `"Rust"` will indicate Rust syntax highlighting.
 //!   You can set the language of the [`SpanContents`] produced by a
 //!   [`NamedSource`] via the [`with_language`](NamedSource::with_language)
 //!   method.
-//! * [name()](SpanContents::name) - In the absence of an explicitly set
+//! * [`name()`](SpanContents::name) - In the absence of an explicitly set
 //!   language, the name is assumed to contain a file name or file path.
 //!   The highlighter will check for a file extension at the end of the name and
 //!   try to guess the syntax from that.
@@ -786,6 +788,7 @@ pub use protocol::*;
 
 mod chain;
 mod diagnostic_chain;
+mod diagnostic_impls;
 mod error;
 mod eyreish;
 #[cfg(feature = "fancy-base")]

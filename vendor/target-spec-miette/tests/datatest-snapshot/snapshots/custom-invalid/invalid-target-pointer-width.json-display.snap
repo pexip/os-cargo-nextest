@@ -1,0 +1,13 @@
+---
+source: target-spec-miette/tests/snapshot/custom.rs
+expression: "format!(\"{:?}\", miette::Report::new_boxed(diagnostic))"
+snapshot_kind: text
+---
+  × error deserializing custom target JSON for `my-target`
+    ╭─[52:30]
+ 51 │   ],
+ 52 │   "target-pointer-width": "xx",
+    ·                              ▲
+    ·                              ╰── error parsing as integer: invalid digit found in string
+ 53 │   "supports-xray": true,
+    ╰────

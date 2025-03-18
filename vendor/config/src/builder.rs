@@ -38,6 +38,8 @@ use crate::{config::Config, path::Expression, source::Source, value::Value};
 /// # use config::*;
 /// # use std::error::Error;
 /// # fn main() -> Result<(), Box<dyn Error>> {
+/// # #[cfg(feature = "json")]
+/// # {
 /// let mut builder = Config::builder()
 ///     .set_default("default", "1")?
 ///     .add_source(File::new("config/settings", FileFormat::Json))
@@ -52,6 +54,7 @@ use crate::{config::Config, path::Expression, source::Source, value::Value};
 ///         // something went wrong
 ///     }
 /// }
+/// # }
 /// # Ok(())
 /// # }
 /// ```
@@ -64,11 +67,14 @@ use crate::{config::Config, path::Expression, source::Source, value::Value};
 /// # use std::error::Error;
 /// # use config::*;
 /// # fn main() -> Result<(), Box<dyn Error>> {
+/// # #[cfg(feature = "json")]
+/// # {
 /// let mut builder = Config::builder();
 /// builder = builder.set_default("default", "1")?;
 /// builder = builder.add_source(File::new("config/settings", FileFormat::Json));
 /// builder = builder.add_source(File::new("config/settings.prod", FileFormat::Json));
 /// builder = builder.set_override("override", "1")?;
+/// # }
 /// # Ok(())
 /// # }
 /// ```
@@ -97,28 +103,13 @@ pub struct ConfigBuilder<St: BuilderState> {
 /// Represents [`ConfigBuilder`] state.
 pub trait BuilderState {}
 
-/// Represents data specific to builder in default, sychronous state, without support for async.
+/// Represents data specific to builder in default, synchronous state, without support for async.
 #[derive(Debug, Default, Clone)]
 pub struct DefaultState {
     sources: Vec<Box<dyn Source + Send + Sync>>,
 }
 
-// Dummy useless struct
-//
-// This struct exists only to avoid the semver break
-// which would be implied by removing it.
-//
-// This struct cannot be used for anything useful.
-// (Nor can it be extended without a semver break, either.)
-//
-// In a future release, we should have
-//    type AsyncConfigBuilder = ConfigBuilder<AsyncState>;
-#[deprecated = "AsyncConfigBuilder is useless.  Use ConfigBuilder<AsyncState>"]
-#[doc(hidden)]
-#[derive(Debug, Clone, Default)]
-pub struct AsyncConfigBuilder {}
-
-/// Represents data specific to builder in asychronous state, with support for async.
+/// Represents data specific to builder in asynchronous state, with support for async.
 #[derive(Debug, Default, Clone)]
 pub struct AsyncState {
     sources: Vec<SourceType>,

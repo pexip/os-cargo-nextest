@@ -2,19 +2,19 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::{
+    DependencyKind, Error, PackageId,
     debug_ignore::DebugIgnore,
     errors::FeatureGraphWarning,
     graph::{
-        feature::{
-            build::{FeatureGraphBuildState, FeaturePetgraph},
-            Cycles, FeatureFilter, FeatureList, WeakDependencies, WeakIndex,
-        },
         DependencyDirection, FeatureIndexInPackage, FeatureIx, PackageGraph, PackageIx,
         PackageLink, PackageMetadata,
+        feature::{
+            Cycles, FeatureFilter, FeatureList, WeakDependencies, WeakIndex,
+            build::{FeatureGraphBuildState, FeaturePetgraph},
+        },
     },
     petgraph_support::{scc::Sccs, topo::TopoWithCycles},
     platform::{PlatformStatus, PlatformStatusImpl},
-    DependencyKind, Error, PackageId,
 };
 use ahash::AHashMap;
 use once_cell::sync::OnceCell;
@@ -528,7 +528,7 @@ impl<'g> From<(&'g PackageId, FeatureLabel<'g>)> for FeatureId<'g> {
 ///     "region 2.1.2 (registry+https://github.com/rust-lang/crates.io-index)/dep:bar"
 /// );
 /// ```
-impl<'g> fmt::Display for FeatureId<'g> {
+impl fmt::Display for FeatureId<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.package_id, self.label)
     }
@@ -552,7 +552,7 @@ pub enum FeatureLabel<'g> {
     OptionalDependency(&'g str),
 }
 
-impl<'g> FeatureLabel<'g> {
+impl FeatureLabel<'_> {
     /// Returns the kind of feature this is.
     ///
     /// The kind of a feature is simply the enum variant without any associated data.
@@ -581,8 +581,7 @@ impl<'g> FeatureLabel<'g> {
 /// assert_eq!(format!("{}", FeatureLabel::Named("foo")), "foo");
 /// assert_eq!(format!("{}", FeatureLabel::OptionalDependency("bar")), "dep:bar");
 /// ```
-
-impl<'g> fmt::Display for FeatureLabel<'g> {
+impl fmt::Display for FeatureLabel<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Base => write!(f, "[base]"),
@@ -593,7 +592,7 @@ impl<'g> fmt::Display for FeatureLabel<'g> {
 }
 
 /// Metadata for a feature within a package.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct FeatureMetadata<'g> {
     graph: DebugIgnore<FeatureGraph<'g>>,
     node: FeatureNode,
@@ -638,6 +637,14 @@ impl<'g> FeatureMetadata<'g> {
     #[inline]
     pub(in crate::graph) fn feature_ix(&self) -> NodeIndex<FeatureIx> {
         self.inner.feature_ix
+    }
+}
+
+impl fmt::Debug for FeatureMetadata<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FeatureMetadata")
+            .field("id", &self.feature_id())
+            .finish()
     }
 }
 
@@ -722,7 +729,7 @@ impl FeatureGraphImpl {
 /// If a dependency, for example `unix-dep` above, is optional, an implicit feature is created in
 /// the package `main` with the name `unix-dep`. In this case, the dependency from `main/feat` to
 /// `main/unix-dep` is also a `ConditionalLink` representing the same `cfg(unix)` condition.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 pub struct ConditionalLink<'g> {
     graph: DebugIgnore<FeatureGraph<'g>>,
     from: &'g FeatureMetadataImpl,
@@ -832,6 +839,18 @@ impl<'g> ConditionalLink<'g> {
     }
 }
 
+impl fmt::Debug for ConditionalLink<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConditionalLink")
+            .field("from", &self.from())
+            .field("to", &self.to())
+            .field("normal", &self.normal())
+            .field("build", &self.build())
+            .field("dev", &self.dev())
+            .finish()
+    }
+}
+
 // ---
 
 /// A combination of a package ID and a feature name, forming a node in a `FeatureGraph`.
@@ -908,6 +927,16 @@ impl FeatureNode {
 
     pub(in crate::graph) fn package_ix(&self) -> NodeIndex<PackageIx> {
         self.package_ix
+    }
+
+    pub(in crate::graph) fn package_id_and_feature_label<'g>(
+        &self,
+        graph: &'g PackageGraph,
+    ) -> (&'g PackageId, FeatureLabel<'g>) {
+        let package_id = &graph.dep_graph[self.package_ix];
+        let metadata = graph.metadata(package_id).unwrap();
+        let feature_label = metadata.feature_idx_to_label(self.feature_idx);
+        (package_id, feature_label)
     }
 }
 

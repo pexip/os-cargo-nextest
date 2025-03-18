@@ -5,6 +5,9 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 
 use serde::Deserialize;
+use snapbox::assert_data_eq;
+use snapbox::prelude::*;
+use snapbox::str;
 use toml::value::Datetime;
 use toml::Spanned;
 
@@ -79,7 +82,7 @@ fn test_spanned_field() {
     );
 
     for expected in good_datetimes() {
-        let s = format!("foo = {}", expected);
+        let s = format!("foo = {expected}");
         good::<Datetime>(&s, expected, None);
     }
     // ending at something other than the absolute end
@@ -248,14 +251,16 @@ fn deny_unknown_fields() {
 fake = 1"#,
     )
     .unwrap_err();
-    snapbox::assert_eq(
-        "\
+    assert_data_eq!(
+        error.to_string(),
+        str![[r#"
 TOML parse error at line 3, column 1
   |
 3 | fake = 1
   | ^^^^
 unknown field `fake`, expected `real`
-",
-        error.to_string(),
+
+"#]]
+        .raw()
     );
 }

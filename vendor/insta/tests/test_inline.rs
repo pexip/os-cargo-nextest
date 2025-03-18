@@ -9,7 +9,7 @@ use insta::assert_yaml_snapshot;
 #[cfg(feature = "json")]
 use insta::{assert_compact_json_snapshot, assert_json_snapshot};
 
-use insta::{assert_debug_snapshot, assert_snapshot};
+use insta::{assert_compact_debug_snapshot, assert_debug_snapshot, assert_snapshot};
 use std::thread;
 
 #[test]
@@ -59,6 +59,11 @@ fn test_newline() {
     assert_snapshot!("\n", @r###"
 
     "###);
+}
+
+#[test]
+fn test_inline_debug_expr() {
+    assert_snapshot!("hello", "a debug expr", @"hello");
 }
 
 #[cfg(feature = "csv")]
@@ -191,7 +196,6 @@ fn test_yaml_inline() {
         username: "peter-pan".into(),
         email: "peterpan@wonderland.invalid".into()
     }, @r###"
-    ---
     id: 42
     username: peter-pan
     email: peterpan@wonderland.invalid
@@ -215,7 +219,6 @@ fn test_yaml_inline_redacted() {
     }, {
         ".id" => "[user-id]"
     }, @r###"
-    ---
     id: "[user-id]"
     username: peter-pan
     email: peterpan@wonderland.invalid
@@ -282,6 +285,12 @@ fn test_compact_json() {
 }
 
 #[test]
+fn test_compact_debug() {
+    assert_compact_debug_snapshot!((1..30).collect::<Vec<_>>(), @"[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]");
+    assert_compact_debug_snapshot!((1..34).collect::<Vec<_>>(), @"[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33]");
+}
+
+#[test]
 #[should_panic = "Insta does not allow inline snapshot assertions in loops"]
 fn test_inline_test_in_loop() {
     for i in 0..10 {
@@ -299,4 +308,15 @@ fn test_inline_snapshot_whitespace() {
         bar
 
     "###);
+}
+
+#[test]
+fn test_indentation() {
+    assert_snapshot!("aaa\nbbb\nccc\nddd", @r"
+    aaa
+    bbb
+    ccc
+    ddd
+    "
+    );
 }

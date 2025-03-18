@@ -15,6 +15,8 @@ use std::slice;
 #[derive(Clone, Debug)]
 pub(crate) struct Sccs<Ix: IndexType> {
     sccs: Nested<Vec<NodeIndex<Ix>>>,
+    // Map of node indexes to the index of the SCC they belong to. If a node is not part of an SCC,
+    // then the corresponding index is not stored here.
     multi_map: AHashMap<NodeIndex<Ix>, usize>,
 }
 
@@ -61,7 +63,7 @@ impl<Ix: IndexType> Sccs<Ix> {
     }
 
     /// Returns all the SCCs with more than one element.
-    pub fn multi_sccs(&self) -> impl Iterator<Item = &[NodeIndex<Ix>]> + DoubleEndedIterator {
+    pub fn multi_sccs(&self) -> impl DoubleEndedIterator<Item = &[NodeIndex<Ix>]> {
         self.sccs.iter().filter(|scc| scc.len() > 1)
     }
 
@@ -133,7 +135,7 @@ pub(crate) struct NodeIter<'a, Ix> {
     direction: Direction,
 }
 
-impl<'a, Ix> NodeIter<'a, Ix> {
+impl<Ix> NodeIter<'_, Ix> {
     /// Returns the direction this iteration is happening in.
     #[allow(dead_code)]
     pub fn direction(&self) -> Direction {
@@ -141,7 +143,7 @@ impl<'a, Ix> NodeIter<'a, Ix> {
     }
 }
 
-impl<'a, Ix: IndexType> Iterator for NodeIter<'a, Ix> {
+impl<Ix: IndexType> Iterator for NodeIter<'_, Ix> {
     type Item = NodeIndex<Ix>;
 
     fn next(&mut self) -> Option<NodeIndex<Ix>> {

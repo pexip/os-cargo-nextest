@@ -47,7 +47,7 @@ which runs something roughly equivalent to:
 ```rust
 use self_update::cargo_crate_version;
 
-fn update() -> Result<(), Box<::std::error::Error>> {
+fn update() -> Result<(), Box<dyn std::error::Error>> {
     let status = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
@@ -90,7 +90,7 @@ see the [features](#features) section above). The `self_replace` crate is re-exp
 
 ```rust
 # #[cfg(feature = "archive-tar")]
-fn update() -> Result<(), Box<::std::error::Error>> {
+fn update() -> Result<(), Box<dyn std::error::Error>> {
     let releases = self_update::backends::github::ReleaseList::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
@@ -101,7 +101,8 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 
     // get the first available release
     let asset = releases[0]
-        .asset_for(&self_update::get_target()).unwrap();
+        .asset_for(&self_update::get_target(), None)
+        .unwrap();
 
     let tmp_dir = tempfile::Builder::new()
             .prefix("self_update")
@@ -123,6 +124,14 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 
     Ok(())
 }
+```
+
+### Troubleshooting
+
+When using cross compilation tools such as cross if you want to use rustls and not openssl
+
+```toml
+self_update = { version = "0.27.0", features = ["rustls"], default-features = false }
 ```
 
 */
@@ -681,10 +690,11 @@ impl Download {
         }
 
         set_ssl_vars!();
-        let resp = reqwest::blocking::Client::new()
-            .get(&self.url)
-            .headers(headers)
-            .send()?;
+        let client = reqwest::blocking::ClientBuilder::new()
+            .use_rustls_tls()
+            .http2_adaptive_window(true)
+            .build()?;
+        let resp = client.get(&self.url).headers(headers).send()?;
         let size = resp
             .headers()
             .get(reqwest::header::CONTENT_LENGTH)
@@ -1085,7 +1095,7 @@ mod tests {
             #[cfg(feature = "archive-zip")]
             ArchiveKind::Zip => {
                 let mut zip = zip::ZipWriter::new(archive_file);
-                let options = zip::write::FileOptions::default()
+                let options = zip::write::SimpleFileOptions::default()
                     .compression_method(zip::CompressionMethod::Stored);
                 zip.start_file("temp.txt", options)
                     .expect("failed starting zip file");

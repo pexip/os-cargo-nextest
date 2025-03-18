@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::{
+    Error, PackageId,
     graph::{
-        cargo_version_matches, BuildTargetImpl, BuildTargetKindImpl, DepRequiredOrOptional,
-        DependencyReqImpl, NamedFeatureDep, OwnedBuildTargetId, PackageGraph, PackageGraphData,
-        PackageIx, PackageLinkImpl, PackageMetadataImpl, PackagePublishImpl, PackageSourceImpl,
-        WorkspaceImpl,
+        BuildTargetImpl, BuildTargetKindImpl, DepRequiredOrOptional, DependencyReqImpl,
+        NamedFeatureDep, OwnedBuildTargetId, PackageGraph, PackageGraphData, PackageIx,
+        PackageLinkImpl, PackageMetadataImpl, PackagePublishImpl, PackageSourceImpl, WorkspaceImpl,
+        cargo_version_matches,
     },
     sorted_set::SortedSet,
-    Error, PackageId,
 };
 use ahash::AHashMap;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -392,20 +392,18 @@ impl<'a> GraphBuildState<'a> {
         Ok((package_data, build_targets))
     }
 
-    /// Computes the workspace path for this package. Errors if this package is not in the
-    /// workspace.
+    /// Computes the relative path from workspace root to this package, which might be out of root sub tree.
     fn workspace_path(
         &self,
         id: &PackageId,
         manifest_path: &Utf8Path,
     ) -> Result<Box<Utf8Path>, Box<Error>> {
-        // Strip off the workspace path from the manifest path.
-        let workspace_path = manifest_path
-            .strip_prefix(self.workspace_root)
-            .map_err(|_| {
+        // Get relative path from workspace root to manifest path.
+        let workspace_path = pathdiff::diff_utf8_paths(manifest_path, self.workspace_root)
+            .ok_or_else(|| {
                 Error::PackageGraphConstructError(format!(
-                    "workspace member '{}' at path {} not in workspace (root: {})",
-                    id, manifest_path, self.workspace_root
+                    "failed to find path from workspace (root: {}) to member '{id}' at path {manifest_path}",
+                    self.workspace_root
                 ))
             })?;
         let workspace_path = workspace_path.parent().ok_or_else(|| {
@@ -414,7 +412,7 @@ impl<'a> GraphBuildState<'a> {
                 id, manifest_path
             ))
         })?;
-        Ok(convert_forward_slashes(workspace_path).into_boxed_path())
+        Ok(convert_relative_forward_slashes(workspace_path).into_boxed_path())
     }
 
     fn finish(self) -> Graph<PackageId, PackageLinkImpl, Directed, PackageIx> {
@@ -490,33 +488,38 @@ enum ResolvedName {
     NoLibTarget,
 }
 
+/// Matcher for the resolved name of a dependency.
+///
+/// The "rename" field in a dependency, if present, is generally used. (But not always! There are
+/// cases where even if a rename is present, the package name is used instead.)
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-enum ReqResolvedName<'g> {
-    Renamed(String),
-    LibNameSpecified(&'g str),
-    LibNameNotSpecified(&'g str),
-    NoLibTarget,
+struct ReqResolvedName<'g> {
+    // A renamed name, if any.
+    renamed: Option<String>,
+
+    // A resolved name created from the lib.name field.
+    resolved_name: &'g ResolvedName,
 }
 
 impl<'g> ReqResolvedName<'g> {
-    fn from_renamed(rename: &str) -> Self {
-        Self::Renamed(rename.replace('-', "_"))
-    }
-
-    fn from_resolved_name(resolved_name: &'g ResolvedName) -> Self {
-        match resolved_name {
-            ResolvedName::LibNameSpecified(name) => Self::LibNameSpecified(name),
-            ResolvedName::LibNameNotSpecified(name) => Self::LibNameNotSpecified(name),
-            ResolvedName::NoLibTarget => Self::NoLibTarget,
+    fn new(renamed: Option<&str>, resolved_name: &'g ResolvedName) -> Self {
+        Self {
+            renamed: renamed.map(|s| s.replace('-', "_")),
+            resolved_name,
         }
     }
 
     fn matches(&self, name: &str) -> bool {
-        match self {
-            Self::Renamed(rename) => rename == name,
-            Self::LibNameSpecified(resolved_name) => *resolved_name == name,
-            Self::LibNameNotSpecified(resolved_name) => *resolved_name == name,
-            Self::NoLibTarget => {
+        if let Some(rename) = &self.renamed {
+            if rename == name {
+                return true;
+            }
+        }
+
+        match self.resolved_name {
+            ResolvedName::LibNameSpecified(resolved_name) => *resolved_name == name,
+            ResolvedName::LibNameNotSpecified(resolved_name) => *resolved_name == name,
+            ResolvedName::NoLibTarget => {
                 // This code path is only hit with nightly Rust as of 2023-11. It depends on Rust
                 // RFC 3028. at https://github.com/rust-lang/cargo/issues/9096.
                 //
@@ -538,14 +541,10 @@ impl PackageSourceImpl {
     fn create_path(path: &Utf8Path, workspace_root: &Utf8Path) -> Self {
         let path_diff =
             pathdiff::diff_utf8_paths(path, workspace_root).expect("workspace root is absolute");
-        // On Windows, the directory name and the workspace root might be on different drives,
-        // in which case the path can't be relative.
-        let path_diff = if path_diff.is_absolute() {
-            path_diff
-        } else {
-            convert_forward_slashes(path_diff)
-        };
-        Self::Path(path_diff.into_boxed_path())
+        // convert_relative_forward_slashes() can handle both situations, i.e.,
+        // on windows and for relative path, convert forward slashes, otherwise,
+        // (absolute path, or not on windows) just clone.
+        Self::Path(convert_relative_forward_slashes(path_diff).into_boxed_path())
     }
 }
 
@@ -587,9 +586,21 @@ impl<'a> BuildTargets<'a> {
         use std::collections::btree_map::Entry;
 
         // Figure out the id and kind using target.kind and target.crate_types.
-        let mut target_kinds = target.kind;
+        let mut target_kinds = target
+            .kind
+            .into_iter()
+            .map(|kind| kind.to_string())
+            .collect::<Vec<_>>();
         let target_name = target.name.into_boxed_str();
-        let crate_types = SortedSet::new(target.crate_types);
+        // Store crate types as strings to avoid exposing cargo_metadata in the
+        // public API.
+        let crate_types = SortedSet::new(
+            target
+                .crate_types
+                .into_iter()
+                .map(|ct| ct.to_string())
+                .collect::<Vec<_>>(),
+        );
 
         // The "proc-macro" crate type cannot mix with any other types or kinds.
         if target_kinds.len() > 1 && Self::is_proc_macro(&target_kinds) {
@@ -676,7 +687,9 @@ impl<'a> BuildTargets<'a> {
                     required_features: target.required_features,
                     path: target.src_path.into_boxed_path(),
                     edition: target.edition.to_string().into_boxed_str(),
-                    doc_tests: target.doctest,
+                    doc_by_default: target.doc,
+                    doctest_by_default: target.doctest,
+                    test_by_default: target.test,
                 });
             }
         }
@@ -685,7 +698,7 @@ impl<'a> BuildTargets<'a> {
     }
 
     fn is_proc_macro(list: &[String]) -> bool {
-        list.iter().any(|kind| kind.as_str() == "proc-macro")
+        list.iter().any(|kind| *kind == "proc-macro")
     }
 
     fn finish(self) -> BuildTargetMap {
@@ -723,18 +736,15 @@ impl<'g> DependencyResolver<'g> {
             };
             for package in packages {
                 if cargo_version_matches(&dep.req, &package.version) {
-                    // The cargo `resolve.deps` map uses, in order of preference:
+                    // The cargo `resolve.deps` map uses one of two things:
+                    //
                     // 1. dep.rename with - turned into _, if specified.
-                    // 2. lib.name, if specified.
-                    // 3. package.name with - turned into _.
-                    if let Some(rename) = &dep.rename {
-                        dep_reqs.push(ReqResolvedName::from_renamed(rename), dep);
-                    } else {
-                        dep_reqs.push(
-                            ReqResolvedName::from_resolved_name(&package.resolved_name),
-                            dep,
-                        );
-                    }
+                    // 2. lib.name, if specified, otherwise package.name with - turned into _.
+                    //
+                    // ReqResolvedName tracks both of these.
+                    let req_resolved_name =
+                        ReqResolvedName::new(dep.rename.as_deref(), &package.resolved_name);
+                    dep_reqs.push(req_resolved_name, dep);
                 }
             }
         }
@@ -983,21 +993,21 @@ impl PackagePublishImpl {
 
 /// Replace backslashes in a relative path with forward slashes on Windows.
 #[track_caller]
-fn convert_forward_slashes<'a>(rel_path: impl Into<Cow<'a, Utf8Path>>) -> Utf8PathBuf {
+fn convert_relative_forward_slashes<'a>(rel_path: impl Into<Cow<'a, Utf8Path>>) -> Utf8PathBuf {
     let rel_path = rel_path.into();
-    debug_assert!(
-        rel_path.is_relative(),
-        "path {} should be relative",
-        rel_path,
-    );
+    cfg_if::cfg_if! { if #[cfg(windows)] {
 
-    cfg_if::cfg_if! {
-        if #[cfg(windows)] {
+        if rel_path.is_relative() {
             rel_path.as_str().replace("\\", "/").into()
         } else {
             rel_path.into_owned()
         }
-    }
+
+    } else {
+
+        rel_path.into_owned()
+
+    }}
 }
 
 #[cfg(test)]
@@ -1036,27 +1046,81 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
-    fn test_create_path_windows() {
-        // Ensure that relative paths are stored with forward slashes.
-        assert_eq!(
-            PackageSourceImpl::create_path("C:\\data\\foo".as_ref(), "C:\\data\\bar".as_ref()),
-            PackageSourceImpl::Path("../foo".into())
-        );
-        // Paths that span drives cannot be stored as relative.
-        assert_eq!(
-            PackageSourceImpl::create_path("D:\\tmp\\foo".as_ref(), "C:\\data\\bar".as_ref()),
-            PackageSourceImpl::Path("D:\\tmp\\foo".into())
-        );
+    fn test_convert_relative_forward_slashes() {
+        let components = vec!["..", "..", "foo", "bar", "baz.txt"];
+        let path: Utf8PathBuf = components.into_iter().collect();
+        let path = convert_relative_forward_slashes(path);
+        // This should have forward-slashes, even on Windows.
+        assert_eq!(path.as_str(), "../../foo/bar/baz.txt");
+    }
+
+    #[track_caller]
+    fn verify_result_of_diff_utf8_paths(
+        path_manifest: &str,
+        path_workspace_root: &str,
+        expected_relative_path: &str,
+    ) {
+        let relative_path = pathdiff::diff_utf8_paths(
+            Utf8Path::new(path_manifest),
+            Utf8Path::new(path_workspace_root),
+        )
+        .unwrap();
+        assert_eq!(relative_path, expected_relative_path);
     }
 
     #[test]
-    fn test_convert_forward_slashes() {
-        let components = vec!["..", "..", "foo", "bar", "baz.txt"];
-        let path: Utf8PathBuf = components.into_iter().collect();
-        let path = convert_forward_slashes(path);
-        // This should have forward slashes, even on Windows.
-        assert_eq!(path.as_str(), "../../foo/bar/baz.txt");
+    fn test_workspace_path_out_of_pocket() {
+        verify_result_of_diff_utf8_paths(
+            "/workspace/a/b/Crate/Cargo.toml",
+            "/workspace/a/b/.cargo/workspace",
+            r"../../Crate/Cargo.toml",
+        );
+    }
+
+    #[cfg(windows)] // Test for '\\' and 'X:\' etc on windows
+    mod windows {
+        use super::*;
+
+        #[test]
+        fn test_create_path_windows() {
+            // Ensure that relative paths are stored with forward slashes.
+            assert_eq!(
+                PackageSourceImpl::create_path("C:\\data\\foo".as_ref(), "C:\\data\\bar".as_ref()),
+                PackageSourceImpl::Path("../foo".into())
+            );
+            // Paths that span drives cannot be stored as relative.
+            assert_eq!(
+                PackageSourceImpl::create_path("D:\\tmp\\foo".as_ref(), "C:\\data\\bar".as_ref()),
+                PackageSourceImpl::Path("D:\\tmp\\foo".into())
+            );
+        }
+
+        #[test]
+        fn test_convert_relative_forward_slashes_absolute() {
+            let components = vec![r"D:\", "X", "..", "foo", "bar", "baz.txt"];
+            let path: Utf8PathBuf = components.into_iter().collect();
+            let path = convert_relative_forward_slashes(path);
+            // Absolute path keep using backslash on Windows.
+            assert_eq!(path.as_str(), r"D:\X\..\foo\bar\baz.txt");
+        }
+
+        #[test]
+        fn test_workspace_path_out_of_pocket_on_windows_same_driver() {
+            verify_result_of_diff_utf8_paths(
+                r"C:\workspace\a\b\Crate\Cargo.toml",
+                r"C:\workspace\a\b\.cargo\workspace",
+                r"..\..\Crate\Cargo.toml",
+            );
+        }
+
+        #[test]
+        fn test_workspace_path_out_of_pocket_on_windows_different_driver() {
+            verify_result_of_diff_utf8_paths(
+                r"D:\workspace\a\b\Crate\Cargo.toml",
+                r"C:\workspace\a\b\.cargo\workspace",
+                r"D:\workspace\a\b\Crate\Cargo.toml",
+            );
+        }
     }
 }

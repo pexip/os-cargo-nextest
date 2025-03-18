@@ -1,5 +1,5 @@
-pub mod file;
-pub mod string;
+pub(crate) mod file;
+pub(crate) mod string;
 
 use std::error::Error;
 use std::fmt::Debug;

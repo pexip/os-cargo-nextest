@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::{
+    Error, PackageId,
     graph::{
+        DependencyDirection, PackageGraph, PackageIx, PackageLink, PackageSet,
         cargo::build::CargoSetBuildState,
         feature::{FeatureGraph, FeatureSet},
-        DependencyDirection, PackageGraph, PackageIx, PackageLink, PackageSet,
     },
     platform::PlatformSpec,
     sorted_set::SortedSet,
-    Error, PackageId,
 };
 use petgraph::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -114,7 +114,7 @@ impl<'a> CargoOptions<'a> {
     }
 }
 
-impl<'a> Default for CargoOptions<'a> {
+impl Default for CargoOptions<'_> {
     fn default() -> Self {
         Self::new()
     }
@@ -153,10 +153,29 @@ pub enum CargoResolverVersion {
     /// * with dev-dependencies for initials, if tests aren't currently being built
     /// * with [platform-specific dependencies](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#platform-specific-dependencies) that are currently inactive
     ///
-    /// Version 2 of the feature resolver can be enabled by specifying `resolver = "2"` in the
-    /// workspace's `Cargo.toml`.
+    /// Version 2 of the feature resolver can be enabled by specifying `resolver
+    /// = "2"` in the workspace's `Cargo.toml`. It is also [the default resolver
+    /// version](https://doc.rust-lang.org/beta/edition-guide/rust-2021/default-cargo-resolver.html)
+    /// for [the Rust 2021
+    /// edition](https://doc.rust-lang.org/edition-guide/rust-2021/index.html).
     #[serde(rename = "2", alias = "v2")]
     V2,
+
+    /// [Version 3 of the dependency
+    /// resolver](https://doc.rust-lang.org/beta/cargo/reference/resolver.html#resolver-versions),
+    /// available since Rust 1.84.
+    ///
+    /// Version 3 of the resolver enables [MSRV-aware dependency
+    /// resolution](https://doc.rust-lang.org/beta/cargo/reference/config.html#resolverincompatible-rust-versions).
+    /// There are no changes to feature resolution compared to version 2.
+    ///
+    /// Version 3 of the feature resolver can be enabled by specifying `resolver
+    /// = "3"` in the workspace's `Cargo.toml`. It is also [the default resolver
+    /// version](https://doc.rust-lang.org/beta/edition-guide/rust-2024/cargo-resolver.html)
+    /// for [the Rust 2024
+    /// edition](https://doc.rust-lang.org/beta/edition-guide/rust-2024/index.html).
+    #[serde(rename = "3", alias = "v3")]
+    V3,
 }
 
 /// For a given Cargo build simulation, what platform to assume the initials are being built on.
@@ -356,9 +375,7 @@ impl<'g> CargoSet<'g> {
     /// The returned iterator will include proc macros that are depended on normally or in dev
     /// builds from initials (if `include_dev` is set), but not the ones in the
     /// `[build-dependencies]` section.
-    pub fn proc_macro_links<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = PackageLink<'g>> + ExactSizeIterator + 'a {
+    pub fn proc_macro_links<'a>(&'a self) -> impl ExactSizeIterator<Item = PackageLink<'g>> + 'a {
         let package_graph = self.target_features.graph().package_graph;
         self.proc_macro_edge_ixs
             .iter()
@@ -375,9 +392,7 @@ impl<'g> CargoSet<'g> {
     ///
     /// The returned iterators will not include build dependencies of host packages -- those are
     /// also built on the host.
-    pub fn build_dep_links<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = PackageLink<'g>> + ExactSizeIterator + 'a {
+    pub fn build_dep_links<'a>(&'a self) -> impl ExactSizeIterator<Item = PackageLink<'g>> + 'a {
         let package_graph = self.target_features.graph().package_graph;
         self.build_dep_edge_ixs
             .iter()

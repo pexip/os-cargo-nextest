@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-// Refs: https://developer.arm.com/documentation/ddi0406/cb/System-Level-Architecture/The-System-Level-Programmers--Model/ARM-processor-modes-and-ARM-core-registers/Program-Status-Registers--PSRs-?lang=en
-//
-// Generated asm:
-// - armv5te https://godbolt.org/z/Teh7WajMs
+/*
+Refs: https://developer.arm.com/documentation/ddi0406/cb/System-Level-Architecture/The-System-Level-Programmers--Model/ARM-processor-modes-and-ARM-core-registers/Program-Status-Registers--PSRs-
+
+Generated asm:
+- armv5te https://godbolt.org/z/fhaW3d9Kv
+*/
 
 #[cfg(not(portable_atomic_no_asm))]
 use core::arch::asm;
@@ -67,12 +69,12 @@ pub(super) unsafe fn restore(cpsr: State) {
     }
 }
 
-// On pre-v6 ARM, we cannot use core::sync::atomic here because they call the
-// `__sync_*` builtins for non-relaxed load/store (because pre-v6 ARM doesn't
+// On pre-v6 Arm, we cannot use core::sync::atomic here because they call the
+// `__sync_*` builtins for non-relaxed load/store (because pre-v6 Arm doesn't
 // have Data Memory Barrier).
 //
 // Generated asm:
-// - armv5te https://godbolt.org/z/bMxK7M8Ta
+// - armv5te https://godbolt.org/z/deqTqPzqz
 pub(crate) mod atomic {
     #[cfg(not(portable_atomic_no_asm))]
     use core::arch::asm;
@@ -93,34 +95,21 @@ pub(crate) mod atomic {
 
             impl $(<$($generics)*>)? $atomic_type $(<$($generics)*>)? {
                 #[inline]
-                pub(crate) fn load(&self, order: Ordering) -> $value_type {
+                pub(crate) fn load(&self, _order: Ordering) -> $value_type {
                     let src = self.v.get();
                     // SAFETY: any data races are prevented by atomic intrinsics and the raw
                     // pointer passed in is valid because we got it from a reference.
                     unsafe {
                         let out;
-                        match order {
-                            Ordering::Relaxed => {
-                                asm!(
-                                    concat!("ldr", $asm_suffix, " {out}, [{src}]"),
-                                    src = in(reg) src,
-                                    out = lateout(reg) out,
-                                    options(nostack, preserves_flags, readonly),
-                                );
-                            }
-                            Ordering::Acquire | Ordering::SeqCst => {
-                                // inline asm without nomem/readonly implies compiler fence.
-                                // And compiler fence is fine because the user explicitly declares that
-                                // the system is single-core by using an unsafe cfg.
-                                asm!(
-                                    concat!("ldr", $asm_suffix, " {out}, [{src}]"),
-                                    src = in(reg) src,
-                                    out = lateout(reg) out,
-                                    options(nostack, preserves_flags),
-                                );
-                            }
-                            _ => unreachable!("{:?}", order),
-                        }
+                        // inline asm without nomem/readonly implies compiler fence.
+                        // And compiler fence is fine because the user explicitly declares that
+                        // the system is single-core by using an unsafe cfg.
+                        asm!(
+                            concat!("ldr", $asm_suffix, " {out}, [{src}]"),
+                            src = in(reg) src,
+                            out = lateout(reg) out,
+                            options(nostack, preserves_flags),
+                        );
                         out
                     }
                 }

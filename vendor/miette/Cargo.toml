@@ -13,13 +13,19 @@
 edition = "2018"
 rust-version = "1.70.0"
 name = "miette"
-version = "7.2.0"
+version = "7.5.0"
 authors = ["Kat Marchán <kzm@zkat.tech>"]
+build = false
 exclude = [
     "images/",
     "tests/",
     "miette-derive/",
 ]
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Fancy diagnostic reporting library and protocol for us mere mortals who aren't compiler hackers."
 documentation = "https://docs.rs/miette"
 readme = "README.md"
@@ -29,6 +35,15 @@ repository = "https://github.com/zkat/miette"
 
 [package.metadata.docs.rs]
 all-features = true
+
+[lib]
+name = "miette"
+path = "src/lib.rs"
+
+[[example]]
+name = "serde_json"
+path = "examples/serde_json.rs"
+required-features = ["fancy"]
 
 [dependencies.backtrace]
 version = "0.3.69"
@@ -42,7 +57,7 @@ optional = true
 version = "1.0.0"
 
 [dependencies.miette-derive]
-version = "=7.2.0"
+version = "=7.5.0"
 optional = true
 
 [dependencies.owo-colors]
@@ -71,12 +86,17 @@ version = "5.1.0"
 optional = true
 
 [dependencies.terminal_size]
-version = "0.3.0"
+version = "0.4.0"
 optional = true
 
 [dependencies.textwrap]
 version = "0.16.0"
+features = [
+    "unicode-linebreak",
+    "unicode-width",
+]
 optional = true
+default-features = false
 
 [dependencies.thiserror]
 version = "1.0.56"
@@ -103,6 +123,10 @@ version = "1.0"
 [dev-dependencies.semver]
 version = "1.0.21"
 
+[dev-dependencies.serde]
+version = "1.0.196"
+features = ["derive"]
+
 [dev-dependencies.serde_json]
 version = "1.0.113"
 
@@ -119,26 +143,26 @@ features = ["diff"]
 
 [features]
 default = ["derive"]
-derive = ["miette-derive"]
+derive = ["dep:miette-derive"]
 fancy = [
     "fancy-no-backtrace",
-    "backtrace",
-    "backtrace-ext",
+    "dep:backtrace",
+    "dep:backtrace-ext",
 ]
 fancy-base = [
-    "owo-colors",
-    "textwrap",
+    "dep:owo-colors",
+    "dep:textwrap",
 ]
 fancy-no-backtrace = [
     "fancy-base",
-    "terminal_size",
-    "supports-hyperlinks",
-    "supports-color",
-    "supports-unicode",
+    "dep:terminal_size",
+    "dep:supports-hyperlinks",
+    "dep:supports-color",
+    "dep:supports-unicode",
 ]
 fancy-no-syscall = ["fancy-base"]
 no-format-args-capture = []
 syntect-highlighter = [
     "fancy-no-backtrace",
-    "syntect",
+    "dep:syntect",
 ]

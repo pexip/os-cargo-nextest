@@ -11,9 +11,15 @@
 
 [package]
 edition = "2021"
-rust-version = "1.73"
+rust-version = "1.78"
 name = "target-spec-miette"
-version = "0.4.0"
+version = "0.4.4"
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Integrate target-spec errors with the miette library"
 documentation = "https://docs.rs/target-spec-miette"
 readme = "README.md"
@@ -27,11 +33,59 @@ categories = ["development-tools"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/guppy-rs/guppy"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg=doc_cfg"]
+
+[lib]
+name = "target_spec_miette"
+path = "src/lib.rs"
+
+[[test]]
+name = "datatest-snapshot"
+path = "tests/datatest-snapshot/main.rs"
+harness = false
+required-features = ["fixtures"]
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+
 [dependencies.guppy-workspace-hack]
 version = "0.1.0"
 
+[dependencies.include_dir]
+version = "0.7.4"
+optional = true
+
 [dependencies.miette]
-version = "7.0.0"
+version = "7.4.0"
 
 [dependencies.target-spec]
-version = "3.1.0"
+version = "3.3.1"
+
+[dev-dependencies.datatest-stable]
+version = "0.3.0"
+features = ["include-dir"]
+
+[dev-dependencies.insta]
+version = "1.41.1"
+
+[dev-dependencies.miette]
+version = "7.4.0"
+features = ["fancy"]
+
+[dev-dependencies.target-spec]
+version = "3.3.1"
+features = ["custom"]
+
+[features]
+fixtures = ["dep:include_dir"]
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = [
+    "cfg(doc_cfg)",
+    "cfg(guppy_nightly)",
+]

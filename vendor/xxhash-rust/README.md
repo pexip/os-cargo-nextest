@@ -1,6 +1,6 @@
 # xxhash-rust
 
-![Rust](https://github.com/DoumanAsh/xxhash-rust/workflows/Rust/badge.svg?branch=master)
+[![Rust](https://github.com/DoumanAsh/xxhash-rust/actions/workflows/rust.yml/badge.svg)](https://github.com/DoumanAsh/xxhash-rust/actions/workflows/rust.yml)
 [![Crates.io](https://img.shields.io/crates/v/xxhash-rust.svg)](https://crates.io/crates/xxhash-rust)
 [![Documentation](https://docs.rs/xxhash-rust/badge.svg)](https://docs.rs/crate/xxhash-rust/)
 
@@ -14,7 +14,7 @@ Each algorithm is implemented via feature, allowing precise control over code si
 
 ```toml
 [dependencies.xxhash-rust]
-version = "0.8.5"
+version = "0.8.12"
 features = ["xxh3", "const_xxh3"]
 ```
 
@@ -41,6 +41,7 @@ assert!(test_input("TEST"));
 
 By default all features are off.
 
+- `std` - Enables `std::io::Write` trait implementation
 - `xxh32` - Enables 32bit algorithm. Suitable for x86 targets
 - `const_xxh32` - `const fn` version of `xxh32` algorithm
 - `xxh64` - Enables 64 algorithm. Suitable for x86_64 targets
@@ -82,7 +83,3 @@ fn`, but these limitations are quite strict making any high performance code imp
 - `0.8.*` corresponds to C's `0.8.*`
 
 In order to  keep up with original implementation version I'm not planning to bump major/minor until C implementation does so.
-
-## Comparison with twox-hash
-
-Refer to my [comment](https://github.com/DoumanAsh/xxhash-rust/issues/10#issuecomment-980488647)

@@ -18,15 +18,13 @@
 
 [JSON]: https://github.com/serde-rs/json
 [TOML]: https://github.com/toml-lang/toml
-[YAML]: https://github.com/chyh1990/yaml-rust
+[YAML]: https://github.com/Ethiraric/yaml-rust2
 [INI]: https://github.com/zonyitoo/rust-ini
 [RON]: https://github.com/ron-rs/ron
 [JSON5]: https://github.com/callum-oakley/json5-rs
 
-Please note this library
-
- - can not be used to write changed configuration values back to the configuration file(s)!
- - Is case insensitive and all the keys are converted to lowercase internally
+Please note that this library can not be used to write changed configuration
+values back to the configuration file(s)!
 
 ## Usage
 
@@ -55,14 +53,11 @@ See [custom_file_format](https://github.com/mehcode/config-rs/tree/master/exampl
 See the [documentation](https://docs.rs/config) or [examples](https://github.com/mehcode/config-rs/tree/master/examples) for
 more usage information.
 
-
-## MSRV
-
-We currently support Rust 1.70.0 and newer.
-
-
 ## License
 
-config-rs is primarily distributed under the terms of both the MIT license and the Apache License (Version 2.0).
+Licensed under either of
 
-See LICENSE-APACHE and LICENSE-MIT for details.
+* Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+* MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.

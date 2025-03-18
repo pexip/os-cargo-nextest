@@ -8,16 +8,16 @@ This crate provides two procedural macros, `#[derive(Arbitrary)]` and `#[proptes
 
 Each of these macros is an alternative to the following proptest's official macros.
 
-| [test-strategy][]                          | [proptest][]                  | [proptest-derive][]                 |
-| ------------------------------------------ | ----------------------------- | ----------------------------------- |
-| [`#[derive(Arbitrary)]`](#derivearbitrary) |                               | [`#[derive(Arbitrary)]`][offical-a] |
-| [`#[proptest]`](#proptest)                 | [`proptest ! { }`][offical-m] |                                     |
+| [test-strategy][]                          | [proptest][]                   | [proptest-derive][]                  |
+| ------------------------------------------ | ------------------------------ | ------------------------------------ |
+| [`#[derive(Arbitrary)]`](#derivearbitrary) |                                | [`#[derive(Arbitrary)]`][official-a] |
+| [`#[proptest]`](#proptest)                 | [`proptest ! { }`][official-m] |                                      |
 
 [test-strategy]: https://crates.io/crates/test-strategy
 [proptest]: https://crates.io/crates/proptest
 [proptest-derive]: https://crates.io/crates/proptest-derive
-[offical-m]: https://altsysrq.github.io/rustdoc/proptest/latest/proptest/macro.proptest.html
-[offical-a]: https://altsysrq.github.io/proptest-book/proptest-derive/modifiers.html
+[official-m]: https://altsysrq.github.io/rustdoc/proptest/latest/proptest/macro.proptest.html
+[official-a]: https://altsysrq.github.io/proptest-book/proptest-derive/modifiers.html
 
 The macros provided by this crate have the following advantages over the proptest's official macros.
 
@@ -32,8 +32,8 @@ Add this to your Cargo.toml:
 
 ```toml
 [dependencies]
-test-strategy = "0.3.1"
-proptest = "1.0.0"
+test-strategy = "0.4.0"
+proptest = "1.5.0"
 ```
 
 ## Example
@@ -645,9 +645,9 @@ The value specifies the asynchronous runtime used for the test.
 
 ```toml
 [dev-dependencies]
-test-strategy = "0.3"
-proptest = "1.1.0"
-tokio = { version = "1.28.1", features = ["rt-multi-thread"] }
+test-strategy = "0.4.0"
+proptest = "1.5.0"
+tokio = { version = "1.38.0", features = ["rt-multi-thread"] }
 ```
 
 ```rust
@@ -657,7 +657,7 @@ use proptest::prop_assert;
 #[proptest(async = "tokio")]
 async fn my_test_async() {
     async { }.await;
-    prop_assert!(true);    
+    prop_assert!(true);
 }
 ```
 

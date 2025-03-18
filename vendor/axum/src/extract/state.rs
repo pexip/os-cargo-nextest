@@ -11,7 +11,11 @@ use std::{
 /// See ["Accessing state in middleware"][state-from-middleware] for how to
 /// access state in middleware.
 ///
+/// State is global and used in every request a router with state receives.
+/// For accessing data derived from requests, such as authorization data, see [`Extension`].
+///
 /// [state-from-middleware]: crate::middleware#accessing-state-in-middleware
+/// [`Extension`]: crate::Extension
 ///
 /// # With `Router`
 ///
@@ -131,13 +135,11 @@ use std::{
 /// let method_router_with_state = get(handler)
 ///     // provide the state so the handler can access it
 ///     .with_state(state);
+/// # let _: axum::routing::MethodRouter = method_router_with_state;
 ///
 /// async fn handler(State(state): State<AppState>) {
 ///     // use `state`...
 /// }
-/// # async {
-/// # axum::Server::bind(&"".parse().unwrap()).serve(method_router_with_state.into_make_service()).await.unwrap();
-/// # };
 /// ```
 ///
 /// # With `Handler`
@@ -158,10 +160,8 @@ use std::{
 /// let handler_with_state = handler.with_state(state);
 ///
 /// # async {
-/// axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
-///     .serve(handler_with_state.into_make_service())
-///     .await
-///     .expect("server failed");
+/// let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+/// axum::serve(listener, handler_with_state.into_make_service()).await.unwrap();
 /// # };
 /// ```
 ///
@@ -325,8 +325,10 @@ use std::{
 /// }
 ///
 /// async fn handler(State(state): State<AppState>) {
-///     let mut data = state.data.lock().expect("mutex was poisoned");
-///     *data = "updated foo".to_owned();
+///     {
+///         let mut data = state.data.lock().expect("mutex was poisoned");
+///         *data = "updated foo".to_owned();
+///     }
 ///
 ///     // ...
 /// }

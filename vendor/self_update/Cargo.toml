@@ -12,7 +12,7 @@
 [package]
 edition = "2018"
 name = "self_update"
-version = "0.39.0"
+version = "0.42.0"
 authors = ["James Kominick <james@kominick.com>"]
 exclude = [
     "/ci/*",
@@ -43,7 +43,7 @@ version = "1"
 optional = true
 
 [dependencies.hyper]
-version = "0.14"
+version = "1"
 
 [dependencies.indicatif]
 version = "0.17"
@@ -52,16 +52,18 @@ version = "0.17"
 version = "0.4"
 
 [dependencies.quick-xml]
-version = "0.23"
+version = "0.37"
 
 [dependencies.regex]
 version = "1"
 
 [dependencies.reqwest]
-version = "0.11"
+version = "0.12"
 features = [
     "blocking",
     "json",
+    "rustls-tls",
+    "http2",
 ]
 default-features = false
 
@@ -85,13 +87,13 @@ version = "3"
 version = "2.1"
 
 [dependencies.zip]
-version = "0.6"
+version = "2"
 features = ["time"]
 optional = true
 default-features = false
 
 [dependencies.zipsign-api]
-version = "0.1.0-a.3"
+version = "0.1"
 optional = true
 default-features = false
 

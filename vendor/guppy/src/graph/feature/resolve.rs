@@ -4,19 +4,19 @@
 use std::fmt;
 
 use crate::{
+    Error, PackageId,
     debug_ignore::DebugIgnore,
     graph::{
+        DependencyDirection, FeatureGraphSpec, FeatureIx, PackageIx, PackageMetadata, PackageSet,
         cargo::{CargoOptions, CargoSet},
         feature::{
-            build::FeatureEdgeReference, ConditionalLink, FeatureEdge, FeatureGraph, FeatureId,
-            FeatureList, FeatureMetadata, FeatureQuery, FeatureResolver,
+            ConditionalLink, FeatureEdge, FeatureGraph, FeatureId, FeatureList, FeatureMetadata,
+            FeatureQuery, FeatureResolver, build::FeatureEdgeReference,
         },
         resolve_core::ResolveCore,
-        DependencyDirection, FeatureGraphSpec, FeatureIx, PackageIx, PackageMetadata, PackageSet,
     },
-    petgraph_support::{dfs::BufferedEdgeFilterFn, IxBitSet},
+    petgraph_support::{IxBitSet, dfs::BufferedEdgeFilterFn},
     sorted_set::SortedSet,
-    Error, PackageId,
 };
 use fixedbitset::FixedBitSet;
 use itertools::Either;
@@ -70,7 +70,7 @@ pub struct FeatureSet<'g> {
     core: ResolveCore<FeatureGraphSpec>,
 }
 
-impl<'g> fmt::Debug for FeatureSet<'g> {
+impl fmt::Debug for FeatureSet<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_set()
             .entries(self.packages_with_features(DependencyDirection::Forward))
@@ -407,7 +407,7 @@ impl<'g> FeatureSet<'g> {
     pub fn feature_ids<'a>(
         &'a self,
         direction: DependencyDirection,
-    ) -> impl Iterator<Item = FeatureId<'g>> + ExactSizeIterator + 'a {
+    ) -> impl ExactSizeIterator<Item = FeatureId<'g>> + 'a {
         let graph = self.graph;
         self.core
             .topo(graph.sccs(), direction)
@@ -426,7 +426,7 @@ impl<'g> FeatureSet<'g> {
     pub fn features<'a>(
         &'a self,
         direction: DependencyDirection,
-    ) -> impl Iterator<Item = FeatureMetadata<'g>> + ExactSizeIterator + 'a {
+    ) -> impl ExactSizeIterator<Item = FeatureMetadata<'g>> + 'a {
         let graph = self.graph;
         self.core
             .topo(graph.sccs(), direction)
@@ -478,7 +478,7 @@ impl<'g> FeatureSet<'g> {
     pub fn root_ids<'a>(
         &'a self,
         direction: DependencyDirection,
-    ) -> impl Iterator<Item = FeatureId<'g>> + ExactSizeIterator + 'a {
+    ) -> impl ExactSizeIterator<Item = FeatureId<'g>> + 'a {
         let dep_graph = self.graph.dep_graph();
         let package_graph = self.graph.package_graph;
         self.core
@@ -605,11 +605,11 @@ impl<'g> FeatureSet<'g> {
     }
 }
 
-impl<'g> PartialEq for FeatureSet<'g> {
+impl PartialEq for FeatureSet<'_> {
     fn eq(&self, other: &Self) -> bool {
         ::std::ptr::eq(self.graph.package_graph, other.graph.package_graph)
             && self.core == other.core
     }
 }
 
-impl<'g> Eq for FeatureSet<'g> {}
+impl Eq for FeatureSet<'_> {}

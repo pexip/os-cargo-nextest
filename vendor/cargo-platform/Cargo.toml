@@ -11,17 +11,35 @@
 
 [package]
 edition = "2021"
-rust-version = "1.73"
+rust-version = "1.78"
 name = "cargo-platform"
-version = "0.1.8"
+version = "0.1.9"
+build = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Cargo's representation of a target platform."
 homepage = "https://github.com/rust-lang/cargo"
 documentation = "https://docs.rs/cargo-platform"
+readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rust-lang/cargo"
 
+[lib]
+name = "cargo_platform"
+path = "src/lib.rs"
+
+[[example]]
+name = "matches"
+path = "examples/matches.rs"
+
+[[test]]
+name = "test_cfg"
+path = "tests/test_cfg.rs"
+
 [dependencies.serde]
-version = "1.0.194"
+version = "1.0.204"
 
 [lints.clippy]
 dbg_macro = "warn"

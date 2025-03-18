@@ -1,6 +1,8 @@
-use crate::body::HttpBody;
+use crate::{
+    extract::{nested_path::SetNestedPath, Request},
+    handler::Handler,
+};
 use axum_core::response::IntoResponse;
-use http::Request;
 use matchit::MatchError;
 use std::{borrow::Cow, collections::HashMap, convert::Infallible, fmt, sync::Arc};
 use tower_layer::Layer;
@@ -11,15 +13,14 @@ use super::{
     MethodRouter, Route, RouteId, FALLBACK_PARAM_PATH, NEST_TAIL_PARAM,
 };
 
-pub(super) struct PathRouter<S, B, const IS_FALLBACK: bool> {
-    routes: HashMap<RouteId, Endpoint<S, B>>,
+pub(super) struct PathRouter<S, const IS_FALLBACK: bool> {
+    routes: HashMap<RouteId, Endpoint<S>>,
     node: Arc<Node>,
     prev_route_id: RouteId,
 }
 
-impl<S, B> PathRouter<S, B, true>
+impl<S> PathRouter<S, true>
 where
-    B: HttpBody + Send + 'static,
     S: Clone + Send + Sync + 'static,
 {
     pub(super) fn new_fallback() -> Self {
@@ -28,21 +29,20 @@ where
         this
     }
 
-    pub(super) fn set_fallback(&mut self, endpoint: Endpoint<S, B>) {
+    pub(super) fn set_fallback(&mut self, endpoint: Endpoint<S>) {
         self.replace_endpoint("/", endpoint.clone());
         self.replace_endpoint(FALLBACK_PARAM_PATH, endpoint);
     }
 }
 
-impl<S, B, const IS_FALLBACK: bool> PathRouter<S, B, IS_FALLBACK>
+impl<S, const IS_FALLBACK: bool> PathRouter<S, IS_FALLBACK>
 where
-    B: HttpBody + Send + 'static,
     S: Clone + Send + Sync + 'static,
 {
     pub(super) fn route(
         &mut self,
         path: &str,
-        method_router: MethodRouter<S, B>,
+        method_router: MethodRouter<S>,
     ) -> Result<(), Cow<'static, str>> {
         fn validate_path(path: &str) -> Result<(), &'static str> {
             if path.is_empty() {
@@ -55,8 +55,6 @@ where
         }
 
         validate_path(path)?;
-
-        let id = self.next_route_id();
 
         let endpoint = if let Some((route_id, Endpoint::MethodRouter(prev_method_router))) = self
             .node
@@ -77,10 +75,23 @@ where
             Endpoint::MethodRouter(method_router)
         };
 
+        let id = self.next_route_id();
         self.set_node(path, id)?;
         self.routes.insert(id, endpoint);
 
         Ok(())
+    }
+
+    pub(super) fn method_not_allowed_fallback<H, T>(&mut self, handler: H)
+    where
+        H: Handler<T, S>,
+        T: 'static,
+    {
+        for (_, endpoint) in self.routes.iter_mut() {
+            if let Endpoint::MethodRouter(rt) = endpoint {
+                *rt = rt.clone().default_fallback(handler.clone());
+            }
+        }
     }
 
     pub(super) fn route_service<T>(
@@ -89,7 +100,7 @@ where
         service: T,
     ) -> Result<(), Cow<'static, str>>
     where
-        T: Service<Request<B>, Error = Infallible> + Clone + Send + 'static,
+        T: Service<Request, Error = Infallible> + Clone + Send + 'static,
         T::Response: IntoResponse,
         T::Future: Send + 'static,
     {
@@ -99,7 +110,7 @@ where
     pub(super) fn route_endpoint(
         &mut self,
         path: &str,
-        endpoint: Endpoint<S, B>,
+        endpoint: Endpoint<S>,
     ) -> Result<(), Cow<'static, str>> {
         if path.is_empty() {
             return Err("Paths must start with a `/`. Use \"/\" for root routes".into());
@@ -115,18 +126,15 @@ where
     }
 
     fn set_node(&mut self, path: &str, id: RouteId) -> Result<(), String> {
-        let mut node =
-            Arc::try_unwrap(Arc::clone(&self.node)).unwrap_or_else(|node| (*node).clone());
-        if let Err(err) = node.insert(path, id) {
-            return Err(format!("Invalid route {path:?}: {err}"));
-        }
-        self.node = Arc::new(node);
-        Ok(())
+        let node = Arc::make_mut(&mut self.node);
+
+        node.insert(path, id)
+            .map_err(|err| format!("Invalid route {path:?}: {err}"))
     }
 
     pub(super) fn merge(
         &mut self,
-        other: PathRouter<S, B, IS_FALLBACK>,
+        other: PathRouter<S, IS_FALLBACK>,
     ) -> Result<(), Cow<'static, str>> {
         let PathRouter {
             routes,
@@ -166,10 +174,10 @@ where
 
     pub(super) fn nest(
         &mut self,
-        path: &str,
-        router: PathRouter<S, B, IS_FALLBACK>,
+        path_to_nest_at: &str,
+        router: PathRouter<S, IS_FALLBACK>,
     ) -> Result<(), Cow<'static, str>> {
-        let prefix = validate_nest_path(path);
+        let prefix = validate_nest_path(path_to_nest_at);
 
         let PathRouter {
             routes,
@@ -185,7 +193,11 @@ where
 
             let path = path_for_nested_route(prefix, inner_path);
 
-            match endpoint.layer(StripPrefix::layer(prefix)) {
+            let layer = (
+                StripPrefix::layer(prefix),
+                SetNestedPath::layer(path_to_nest_at),
+            );
+            match endpoint.layer(layer) {
                 Endpoint::MethodRouter(method_router) => {
                     self.route(&path, method_router)?;
                 }
@@ -198,13 +210,17 @@ where
         Ok(())
     }
 
-    pub(super) fn nest_service<T>(&mut self, path: &str, svc: T) -> Result<(), Cow<'static, str>>
+    pub(super) fn nest_service<T>(
+        &mut self,
+        path_to_nest_at: &str,
+        svc: T,
+    ) -> Result<(), Cow<'static, str>>
     where
-        T: Service<Request<B>, Error = Infallible> + Clone + Send + 'static,
+        T: Service<Request, Error = Infallible> + Clone + Send + 'static,
         T::Response: IntoResponse,
         T::Future: Send + 'static,
     {
-        let path = validate_nest_path(path);
+        let path = validate_nest_path(path_to_nest_at);
         let prefix = path;
 
         let path = if path.ends_with('/') {
@@ -213,7 +229,11 @@ where
             format!("{path}/*{NEST_TAIL_PARAM}")
         };
 
-        let endpoint = Endpoint::Route(Route::new(StripPrefix::new(svc, prefix)));
+        let layer = (
+            StripPrefix::layer(prefix),
+            SetNestedPath::layer(path_to_nest_at),
+        );
+        let endpoint = Endpoint::Route(Route::new(layer.layer(svc)));
 
         self.route_endpoint(&path, endpoint.clone())?;
 
@@ -229,14 +249,13 @@ where
         Ok(())
     }
 
-    pub(super) fn layer<L, NewReqBody>(self, layer: L) -> PathRouter<S, NewReqBody, IS_FALLBACK>
+    pub(super) fn layer<L>(self, layer: L) -> PathRouter<S, IS_FALLBACK>
     where
-        L: Layer<Route<B>> + Clone + Send + 'static,
-        L::Service: Service<Request<NewReqBody>> + Clone + Send + 'static,
-        <L::Service as Service<Request<NewReqBody>>>::Response: IntoResponse + 'static,
-        <L::Service as Service<Request<NewReqBody>>>::Error: Into<Infallible> + 'static,
-        <L::Service as Service<Request<NewReqBody>>>::Future: Send + 'static,
-        NewReqBody: HttpBody + 'static,
+        L: Layer<Route> + Clone + Send + 'static,
+        L::Service: Service<Request> + Clone + Send + 'static,
+        <L::Service as Service<Request>>::Response: IntoResponse + 'static,
+        <L::Service as Service<Request>>::Error: Into<Infallible> + 'static,
+        <L::Service as Service<Request>>::Future: Send + 'static,
     {
         let routes = self
             .routes
@@ -257,11 +276,11 @@ where
     #[track_caller]
     pub(super) fn route_layer<L>(self, layer: L) -> Self
     where
-        L: Layer<Route<B>> + Clone + Send + 'static,
-        L::Service: Service<Request<B>> + Clone + Send + 'static,
-        <L::Service as Service<Request<B>>>::Response: IntoResponse + 'static,
-        <L::Service as Service<Request<B>>>::Error: Into<Infallible> + 'static,
-        <L::Service as Service<Request<B>>>::Future: Send + 'static,
+        L: Layer<Route> + Clone + Send + 'static,
+        L::Service: Service<Request> + Clone + Send + 'static,
+        <L::Service as Service<Request>>::Response: IntoResponse + 'static,
+        <L::Service as Service<Request>>::Error: Into<Infallible> + 'static,
+        <L::Service as Service<Request>>::Future: Send + 'static,
     {
         if self.routes.is_empty() {
             panic!(
@@ -286,12 +305,16 @@ where
         }
     }
 
-    pub(super) fn with_state<S2>(self, state: S) -> PathRouter<S2, B, IS_FALLBACK> {
+    pub(super) fn has_routes(&self) -> bool {
+        !self.routes.is_empty()
+    }
+
+    pub(super) fn with_state<S2>(self, state: S) -> PathRouter<S2, IS_FALLBACK> {
         let routes = self
             .routes
             .into_iter()
             .map(|(id, endpoint)| {
-                let endpoint: Endpoint<S2, B> = match endpoint {
+                let endpoint: Endpoint<S2> = match endpoint {
                     Endpoint::MethodRouter(method_router) => {
                         Endpoint::MethodRouter(method_router.with_state(state.clone()))
                     }
@@ -309,10 +332,10 @@ where
     }
 
     pub(super) fn call_with_state(
-        &mut self,
-        mut req: Request<B>,
+        &self,
+        mut req: Request,
         state: S,
-    ) -> Result<RouteFuture<B, Infallible>, (Request<B>, S)> {
+    ) -> Result<RouteFuture<Infallible>, (Request, S)> {
         #[cfg(feature = "original-uri")]
         {
             use crate::extract::OriginalUri;
@@ -323,9 +346,9 @@ where
             }
         }
 
-        let path = req.uri().path().to_owned();
+        let (mut parts, body) = req.into_parts();
 
-        match self.node.at(&path) {
+        match self.node.at(parts.uri.path()) {
             Ok(match_) => {
                 let id = *match_.value;
 
@@ -334,22 +357,23 @@ where
                     crate::extract::matched_path::set_matched_path_for_request(
                         id,
                         &self.node.route_id_to_path,
-                        req.extensions_mut(),
+                        &mut parts.extensions,
                     );
                 }
 
-                url_params::insert_url_params(req.extensions_mut(), match_.params);
+                url_params::insert_url_params(&mut parts.extensions, match_.params);
 
-                let endpont = self
+                let endpoint = self
                     .routes
-                    .get_mut(&id)
+                    .get(&id)
                     .expect("no route for id. This is a bug in axum. Please file an issue");
 
-                match endpont {
+                let req = Request::from_parts(parts, body);
+                match endpoint {
                     Endpoint::MethodRouter(method_router) => {
                         Ok(method_router.call_with_state(req, state))
                     }
-                    Endpoint::Route(route) => Ok(route.clone().call(req)),
+                    Endpoint::Route(route) => Ok(route.clone().call_owned(req)),
                 }
             }
             // explicitly handle all variants in case matchit adds
@@ -358,11 +382,11 @@ where
                 MatchError::NotFound
                 | MatchError::ExtraTrailingSlash
                 | MatchError::MissingTrailingSlash,
-            ) => Err((req, state)),
+            ) => Err((Request::from_parts(parts, body), state)),
         }
     }
 
-    pub(super) fn replace_endpoint(&mut self, path: &str, endpoint: Endpoint<S, B>) {
+    pub(super) fn replace_endpoint(&mut self, path: &str, endpoint: Endpoint<S>) {
         match self.node.at(path) {
             Ok(match_) => {
                 let id = *match_.value;
@@ -385,7 +409,7 @@ where
     }
 }
 
-impl<B, S, const IS_FALLBACK: bool> Default for PathRouter<S, B, IS_FALLBACK> {
+impl<S, const IS_FALLBACK: bool> Default for PathRouter<S, IS_FALLBACK> {
     fn default() -> Self {
         Self {
             routes: Default::default(),
@@ -395,7 +419,7 @@ impl<B, S, const IS_FALLBACK: bool> Default for PathRouter<S, B, IS_FALLBACK> {
     }
 }
 
-impl<S, B, const IS_FALLBACK: bool> fmt::Debug for PathRouter<S, B, IS_FALLBACK> {
+impl<S, const IS_FALLBACK: bool> fmt::Debug for PathRouter<S, IS_FALLBACK> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PathRouter")
             .field("routes", &self.routes)
@@ -404,7 +428,7 @@ impl<S, B, const IS_FALLBACK: bool> fmt::Debug for PathRouter<S, B, IS_FALLBACK>
     }
 }
 
-impl<S, B, const IS_FALLBACK: bool> Clone for PathRouter<S, B, IS_FALLBACK> {
+impl<S, const IS_FALLBACK: bool> Clone for PathRouter<S, IS_FALLBACK> {
     fn clone(&self) -> Self {
         Self {
             routes: self.routes.clone(),

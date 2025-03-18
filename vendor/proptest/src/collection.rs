@@ -37,7 +37,8 @@ use crate::tuple::TupleValueTree;
 /// A value like `0..=std::usize::MAX` will still be accepted but will silently
 /// truncate the maximum to `std::usize::MAX - 1`.
 ///
-/// The `Default` is `0..100`.
+/// The `Default` is `0..PROPTEST_MAX_DEFAULT_SIZE_RANGE`. The max can be set with
+/// the `PROPTEST_MAX_DEFAULT_SIZE_RANGE` env var, which defaults to `100`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct SizeRange(Range<usize>);
 
@@ -47,9 +48,10 @@ pub fn size_range(from: impl Into<SizeRange>) -> SizeRange {
 }
 
 impl Default for SizeRange {
-    /// Constructs a `SizeRange` equivalent to `size_range(0..100)`.
+    /// Constructs a `SizeRange` equivalent to `size_range(0..PROPTEST_MAX_DEFAULT_SIZE_RANGE)`.
+    /// The max can be set with the `PROPTEST_MAX_DEFAULT_SIZE_RANGE` env var, which defaults to `100`.
     fn default() -> Self {
-        size_range(0..100)
+        size_range(0..Config::default().max_default_size_range)
     }
 }
 
@@ -163,18 +165,9 @@ impl From<RangeToInclusive<usize>> for SizeRange {
     }
 }
 
-#[cfg(feature = "frunk")]
-impl Generic for SizeRange {
-    type Repr = RangeInclusive<usize>;
-
-    /// Converts the `SizeRange` into `Range<usize>`.
-    fn into(self) -> Self::Repr {
-        self.0
-    }
-
-    /// Converts `RangeInclusive<usize>` into `SizeRange`.
-    fn from(r: Self::Repr) -> Self {
-        r.into()
+impl From<SizeRange> for Range<usize> {
+    fn from(size_range: SizeRange) -> Self {
+        size_range.0
     }
 }
 

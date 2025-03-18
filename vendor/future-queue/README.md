@@ -14,8 +14,8 @@
 * with global limits
 * and with an optional group specified for each future, with its own limits.
 
-This crate is part of the [nextest organization](https://github.com/nextest-rs) on GitHub, and is
-designed to serve the needs of [cargo-nextest](https://nexte.st).
+This crate is part of the [nextest organization](https://github.com/nextest-rs) on GitHub, and
+is designed to serve the needs of [cargo-nextest](https://nexte.st).
 
 ## Motivation
 
@@ -25,8 +25,8 @@ this adaptor takes a stream of futures[^1], and executes all the futures limited
 amount of concurrency.
 
 * Futures are started in the order the stream returns them in.
-* Once started, futures are polled simultaneously, and completed future outputs are returned
-  in arbitrary order (hence the `unordered`).
+* Once started, futures are polled simultaneously, and completed future outputs are returned in
+  arbitrary order (hence the `unordered`).
 
 Common use cases for `buffer_unordered` include:
 
@@ -55,9 +55,11 @@ This crate provides two adaptors on streams.
 The [`future_queue`](StreamExt::future_queue) adaptor can run several futures simultaneously,
 limiting the concurrency to a maximum *weight*.
 
-Rather than taking a stream of futures, this adaptor takes a stream of `(usize, future)` pairs,
-where the `usize` indicates the weight of each future. This adaptor will schedule and buffer
-futures to be run until queueing the next future will exceed the maximum weight.
+Rather than taking a stream of futures, this adaptor takes a stream of
+`(usize, F)` pairs, where the `usize` indicates the weight of each future,
+and `F` is `FnOnce(FutureQueueContext) -> impl Future`. This adaptor will
+schedule and buffer futures to be run until queueing the next future will
+exceed the maximum weight.
 
 * The maximum weight is never exceeded while futures are being run.
 * If the weight of an individual future is greater than the maximum weight, its weight will be
@@ -80,7 +82,11 @@ use future_queue::{StreamExt as _};
 let (send_one, recv_one) = oneshot::channel();
 let (send_two, recv_two) = oneshot::channel();
 
-let stream_of_futures = stream::iter(vec![(1, recv_one), (2, recv_two)]);
+let stream_of_futures = stream::iter(
+    vec![(1, recv_one), (2, recv_two)],
+).map(|(weight, future)| {
+    (weight, move |_cx| future)
+});
 let mut queue = stream_of_futures.future_queue(10);
 
 send_two.send("hello")?;
@@ -99,10 +105,10 @@ except it is possible to specify an optional *group* for each future. Each group
 weight, and a future will only be scheduled if both the maximum weight and the group weight
 aren't exceeded.
 
-The adaptor is as fair as possible under the given constraints: it will schedule futures in
-the order they're returned by the stream, without doing any reordering based on weight. When
-a future from a group completes, queued up futures in this group will be preferentially
-scheduled before any other futures from the provided stream.
+The adaptor is as fair as possible under the given constraints: it will schedule futures in the
+order they're returned by the stream, without doing any reordering based on weight. When a
+future from a group completes, queued up futures in this group will be preferentially scheduled
+before any other futures from the provided stream.
 
 Like with [`future_queue`](StreamExt::future_queue):
 
@@ -116,7 +122,7 @@ Like with [`future_queue`](StreamExt::future_queue):
 
 ```rust
 use futures::{channel::oneshot, stream, StreamExt as _};
-use future_queue::{StreamExt as _};
+use future_queue::{FutureQueueContext, StreamExt as _};
 
 let (send_one, recv_one) = oneshot::channel();
 let (send_two, recv_two) = oneshot::channel();
@@ -126,7 +132,9 @@ let stream_of_futures = stream::iter(
         (1, Some("group1"), recv_one),
         (2, None, recv_two),
     ],
-);
+).map(|(weight, group, future)| {
+    (weight, group, move |_cx| future)
+});
 let mut queue = stream_of_futures.future_queue_grouped(10, [("group1", 5)]);
 
 send_two.send("hello")?;
@@ -140,11 +148,11 @@ assert_eq!(queue.next().await, None);
 
 ## Minimum supported Rust version (MSRV)
 
-The minimum supported Rust version is **Rust 1.56.**
+The minimum supported Rust version is **Rust 1.70.** At any time, at least the last six months
+of Rust stable releases are supported.
 
-The MSRV will likely not change in the medium term, but while this crate is a pre-release
-(0.x.x) it may have its MSRV bumped in a patch release. Once this crate has reached 1.x, any
-MSRV bump will be accompanied with a new minor version.
+While this crate is a pre-release (0.x.x) it may have its MSRV bumped in a patch release. Once
+this crate has reached 1.x, any MSRV bump will be accompanied with a new minor version.
 
 ## Notes
 

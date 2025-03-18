@@ -17,8 +17,10 @@
 //!
 //! See the [examples](https://github.com/mehcode/config-rs/tree/master/examples) for
 //! general usage information.
-#![allow(unknown_lints)]
-// #![warn(missing_docs)]
+
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![warn(clippy::print_stderr)]
+#![warn(clippy::print_stdout)]
 
 pub mod builder;
 mod config;
@@ -33,6 +35,10 @@ mod ser;
 mod source;
 mod value;
 
+// Re-export
+#[cfg(feature = "convert-case")]
+pub use convert_case::Case;
+
 pub use crate::builder::ConfigBuilder;
 pub use crate::config::Config;
 pub use crate::env::Environment;
@@ -45,10 +51,3 @@ pub use crate::map::Map;
 pub use crate::source::AsyncSource;
 pub use crate::source::Source;
 pub use crate::value::{Value, ValueKind};
-
-#[allow(deprecated)]
-pub use crate::builder::AsyncConfigBuilder;
-
-// Re-export
-#[cfg(feature = "convert-case")]
-pub use convert_case::Case;

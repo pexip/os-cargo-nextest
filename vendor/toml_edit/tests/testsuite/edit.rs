@@ -1,6 +1,8 @@
 use std::iter::FromIterator;
 
-use snapbox::assert_eq;
+use snapbox::assert_data_eq;
+use snapbox::prelude::*;
+use snapbox::str;
 use toml_edit::{array, table, value, DocumentMut, Item, Key, Table, Value};
 
 macro_rules! parse_key {
@@ -39,12 +41,112 @@ impl Test {
         }
         self
     }
-
-    #[track_caller]
-    fn produces_display(&self, expected: &str) -> &Self {
-        assert_eq(expected, self.doc.to_string());
+    fn running_on_doc<F>(&mut self, func: F) -> &mut Self
+    where
+        F: Fn(&mut DocumentMut),
+    {
+        {
+            func(&mut self.doc);
+        }
         self
     }
+
+    #[track_caller]
+    fn produces_display(&self, expected: snapbox::data::Inline) -> &Self {
+        assert_data_eq!(self.doc.to_string(), expected.raw());
+        self
+    }
+}
+
+#[test]
+fn test_add_root_decor() {
+    given(
+        r#"[package]
+name = "hello"
+version = "1.0.0"
+
+[[bin]]
+name = "world"
+path = "src/bin/world/main.rs"
+
+[dependencies]
+nom = "4.0" # future is here
+
+[[bin]]
+name = "delete me please"
+path = "src/bin/dmp/main.rs""#,
+    )
+    .running_on_doc(|document| {
+        document.decor_mut().set_prefix("# Some Header\n\n");
+        document.decor_mut().set_suffix("# Some Footer");
+        document.set_trailing("\n\ntrailing...");
+    })
+    .produces_display(str![[r#"
+# Some Header
+
+[package]
+name = "hello"
+version = "1.0.0"
+
+[[bin]]
+name = "world"
+path = "src/bin/world/main.rs"
+
+[dependencies]
+nom = "4.0" # future is here
+
+[[bin]]
+name = "delete me please"
+path = "src/bin/dmp/main.rs"
+# Some Footer
+
+trailing...
+"#]]);
+}
+
+/// Tests that default decor is None for both suffix and prefix and that this means empty strings
+#[test]
+fn test_no_root_decor() {
+    given(
+        r#"[package]
+name = "hello"
+version = "1.0.0"
+
+[[bin]]
+name = "world"
+path = "src/bin/world/main.rs"
+
+[dependencies]
+nom = "4.0" # future is here
+
+[[bin]]
+name = "delete me please"
+path = "src/bin/dmp/main.rs""#,
+    )
+    .running_on_doc(|document| {
+        assert!(document.decor().prefix().is_none());
+        assert!(document.decor().suffix().is_none());
+        document.set_trailing("\n\ntrailing...");
+    })
+    .produces_display(str![[r#"
+[package]
+name = "hello"
+version = "1.0.0"
+
+[[bin]]
+name = "world"
+path = "src/bin/world/main.rs"
+
+[dependencies]
+nom = "4.0" # future is here
+
+[[bin]]
+name = "delete me please"
+path = "src/bin/dmp/main.rs"
+
+
+trailing...
+"#]]);
 }
 
 // insertion
@@ -65,8 +167,8 @@ fn test_insert_leaf_table() {
         root["servers"]["beta"]["ip"] = value("10.0.0.2");
         root["servers"]["beta"]["dc"] = value("eqdc10");
     })
-    .produces_display(
-        r#"[servers]
+    .produces_display(str![[r#"
+[servers]
 
         [servers.alpha]
         ip = "10.0.0.1"
@@ -77,8 +179,8 @@ ip = "10.0.0.2"
 dc = "eqdc10"
 
         [other.table]
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -94,8 +196,8 @@ fn test_inserted_leaf_table_goes_after_last_sibling() {
     .running(|root| {
         root["dependencies"]["newthing"] = table();
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         [package]
         [dependencies]
         [[example]]
@@ -103,8 +205,8 @@ fn test_inserted_leaf_table_goes_after_last_sibling() {
 
 [dependencies.newthing]
         [dev-dependencies]
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -114,7 +216,11 @@ fn test_inserting_tables_from_different_parsed_docs() {
             let other = "[b]".parse::<DocumentMut>().unwrap();
             root["b"] = other["b"].clone();
         })
-        .produces_display("[a]\n[b]\n");
+        .produces_display(str![[r#"
+[a]
+[b]
+
+"#]]);
 }
 #[test]
 fn test_insert_nonleaf_table() {
@@ -128,8 +234,8 @@ fn test_insert_nonleaf_table() {
         root["servers"]["alpha"]["ip"] = value("10.0.0.1");
         root["servers"]["alpha"]["dc"] = value("eqdc10");
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         [other.table]
 
 [servers]
@@ -137,8 +243,8 @@ fn test_insert_nonleaf_table() {
 [servers.alpha]
 ip = "10.0.0.1"
 dc = "eqdc10"
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -159,8 +265,8 @@ fn test_insert_array() {
         }
         array.push(Table::new());
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         [package]
         title = "withoutarray"
 
@@ -168,8 +274,8 @@ fn test_insert_array() {
 hello = "world"
 
 [[bin]]
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -183,15 +289,45 @@ fn test_insert_values() {
         root["tbl"]["key2"] = value(42);
         root["tbl"]["key3"] = value(8.1415926);
     })
-    .produces_display(
-        r#"[tbl]
+    .produces_display(str![[r#"
+[tbl]
 key1 = "value1"
 key2 = 42
 key3 = 8.1415926
 
         [tbl.son]
-"#,
-    );
+
+"#]]);
+}
+
+#[test]
+fn test_insert_key_with_quotes() {
+    given(
+        r#"
+        [package]
+        name = "foo"
+
+        [target]
+        "#,
+    )
+    .running(|root| {
+        root["target"]["cfg(target_os = \"linux\")"] = table();
+        root["target"]["cfg(target_os = \"linux\")"]["dependencies"] = table();
+        root["target"]["cfg(target_os = \"linux\")"]["dependencies"]["name"] = value("dep");
+    })
+    .produces_display(str![[r#"
+
+        [package]
+        name = "foo"
+
+        [target]
+
+[target.'cfg(target_os = "linux")']
+
+[target.'cfg(target_os = "linux")'.dependencies]
+name = "dep"
+        
+"#]]);
 }
 
 // removal
@@ -216,15 +352,15 @@ fn test_remove_leaf_table() {
         let servers = as_table!(servers);
         assert!(servers.remove("alpha").is_some());
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         [servers]
 
         [servers.beta]
         ip = "10.0.0.2"
         dc = "eqdc10"
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -267,8 +403,8 @@ fn test_remove_nonleaf_table() {
     .running(|root| {
         assert!(root.remove("a").is_some());
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         title = "not relevant"
         # comment 2
         [b] # comment 2.1
@@ -278,8 +414,7 @@ fn test_remove_nonleaf_table() {
            [some.other.table]
 
 
-    "#,
-    );
+    "#]]);
 }
 
 #[test]
@@ -309,8 +444,8 @@ fn test_remove_array_entry() {
         dmp.remove(1);
         assert_eq!(dmp.len(), 1);
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         [package]
         name = "hello"
         version = "1.0.0"
@@ -321,8 +456,8 @@ fn test_remove_array_entry() {
 
         [dependencies]
         nom = "4.0" # future is here
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -347,16 +482,16 @@ fn test_remove_array() {
     .running(|root| {
         assert!(root.remove("bin").is_some());
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         [package]
         name = "hello"
         version = "1.0.0"
 
         [dependencies]
         nom = "4.0" # future is here
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -376,14 +511,14 @@ fn test_remove_value() {
         let value = value.as_value().unwrap();
         assert!(value.is_str());
         let value = value.as_str().unwrap();
-        assert_eq(value, "1.0.0");
+        assert_data_eq!(value, str!["1.0.0"].raw());
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         name = "hello"
         documentation = "https://docs.rs/hello"
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -405,7 +540,7 @@ fn test_remove_last_value_from_implicit() {
         let value = value.as_value().unwrap();
         assert_eq!(value.as_integer(), Some(1));
     })
-    .produces_display(r#""#);
+    .produces_display(str![]);
 }
 
 // values
@@ -429,8 +564,8 @@ fn test_sort_values() {
         let a = as_table!(a);
         a.sort_values();
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         [a.z]
 
         [a]
@@ -440,8 +575,8 @@ fn test_sort_values() {
         c = 3
 
         [a.y]
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -465,8 +600,8 @@ fn test_sort_values_by() {
         // before 'a'.
         a.sort_values_by(|k1, _, k2, _| k1.display_repr().cmp(&k2.display_repr()));
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         [a.z]
 
         [a]
@@ -476,8 +611,8 @@ fn test_sort_values_by() {
         b = 2 # as well as this
 
         [a.y]
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -499,14 +634,14 @@ fn test_set_position() {
             }
         }
     })
-    .produces_display(
-        r#"        [dependencies]
+    .produces_display(str![[r#"
+        [dependencies]
 
         [package]
         [dev-dependencies]
         [dependencies.opencl]
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -524,15 +659,15 @@ fn test_multiple_zero_positions() {
             as_table!(table).set_position(0);
         }
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         [package]
         [dependencies]
         [dev-dependencies]
         [dependencies.opencl]
         a=""
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -550,15 +685,15 @@ fn test_multiple_max_usize_positions() {
             as_table!(table).set_position(usize::MAX);
         }
     })
-    .produces_display(
-        r#"        [dependencies.opencl]
+    .produces_display(str![[r#"
+        [dependencies.opencl]
         a=""
 
         [package]
         [dependencies]
         [dev-dependencies]
-"#,
-    );
+
+"#]]);
 }
 
 macro_rules! as_array {
@@ -609,14 +744,14 @@ fn test_insert_replace_into_array() {
         );
         dbg!(root);
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         a = [1, 2, 3, 4]
         b = ["hello", "beep",   "zoink"   ,
 "world"
 ,  "yikes"]
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -640,12 +775,12 @@ fn test_remove_from_array() {
         assert!(b.remove(0).is_str());
         assert!(b.is_empty());
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         a = [1, 2, 3]
         b = []
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -666,11 +801,10 @@ fn test_format_array() {
             }
         }
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
     a = [1, "2", 3.0]
-    "#,
-    );
+    "#]]);
 }
 
 macro_rules! as_inline_table {
@@ -706,12 +840,12 @@ fn test_insert_into_inline_table() {
         assert_eq!(b.len(), 1);
         b.fmt();
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         a = { a = 2, c = 3, b = 42 }
         b = { hello = "world" }
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -735,12 +869,12 @@ fn test_remove_from_inline_table() {
         assert!(b.remove("hello").is_some());
         assert!(b.is_empty());
     })
-    .produces_display(
-        r#"
+    .produces_display(str![[r#"
+
         a = {a=2, b = 42}
         b = {}
-"#,
-    );
+
+"#]]);
 }
 
 #[test]
@@ -814,11 +948,11 @@ fn test_insert_dotted_into_std_table() {
                 .set_dotted(true);
             root["nixpkgs"]["src"]["git"] = value("https://github.com/nixos/nixpkgs");
         })
-        .produces_display(
-            r#"[nixpkgs]
+        .produces_display(str![[r#"
+[nixpkgs]
 src.git = "https://github.com/nixos/nixpkgs"
-"#,
-        );
+
+"#]]);
 }
 
 #[test]
@@ -833,11 +967,11 @@ fn test_insert_dotted_into_implicit_table() {
                 .unwrap()
                 .set_dotted(true);
         })
-        .produces_display(
-            r#"[nixpkgs]
+        .produces_display(str![[r#"
+[nixpkgs]
 src.git = "https://github.com/nixos/nixpkgs"
-"#,
-        );
+
+"#]]);
 }
 
 #[test]
@@ -845,4 +979,50 @@ fn sorting_with_references() {
     let values = vec!["foo", "qux", "bar"];
     let mut array = toml_edit::Array::from_iter(values);
     array.sort_by(|lhs, rhs| lhs.as_str().cmp(&rhs.as_str()));
+}
+
+#[test]
+fn table_str_key_whitespace() {
+    let mut document = "bookmark = 1010".parse::<DocumentMut>().unwrap();
+
+    let key: &str = "bookmark";
+
+    document.insert(key, array());
+    let table = document[key].as_array_of_tables_mut().unwrap();
+
+    let mut bookmark_table = Table::new();
+    bookmark_table["name"] = value("test.swf".to_owned());
+    table.push(bookmark_table);
+
+    assert_data_eq!(
+        document.to_string(),
+        str![[r#"
+[[bookmark]]
+name = "test.swf"
+
+"#]]
+    );
+}
+
+#[test]
+fn table_key_decor_whitespace() {
+    let mut document = "bookmark = 1010".parse::<DocumentMut>().unwrap();
+
+    let key = Key::parse("  bookmark   ").unwrap().remove(0);
+
+    document.insert_formatted(&key, array());
+    let table = document[&key].as_array_of_tables_mut().unwrap();
+
+    let mut bookmark_table = Table::new();
+    bookmark_table["name"] = value("test.swf".to_owned());
+    table.push(bookmark_table);
+
+    assert_data_eq!(
+        document.to_string(),
+        str![[r#"
+[[  bookmark   ]]
+name = "test.swf"
+
+"#]]
+    );
 }

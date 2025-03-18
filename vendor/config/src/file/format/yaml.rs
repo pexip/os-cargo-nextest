@@ -2,13 +2,13 @@ use std::error::Error;
 use std::fmt;
 use std::mem;
 
-use yaml_rust as yaml;
+use yaml_rust2 as yaml;
 
 use crate::format;
 use crate::map::Map;
 use crate::value::{Value, ValueKind};
 
-pub fn parse(
+pub(crate) fn parse(
     uri: Option<&String>,
     text: &str,
 ) -> Result<Map<String, Value>, Box<dyn Error + Send + Sync>> {
@@ -78,7 +78,7 @@ fn from_yaml_value(
 struct MultipleDocumentsError(usize);
 
 impl fmt::Display for MultipleDocumentsError {
-    fn fmt(&self, format: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, format: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(format, "Got {} YAML documents, expected 1", self.0)
     }
 }
@@ -93,7 +93,7 @@ impl Error for MultipleDocumentsError {
 struct FloatParsingError(String);
 
 impl fmt::Display for FloatParsingError {
-    fn fmt(&self, format: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, format: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(format, "Parsing {} as floating point number failed", self.0)
     }
 }

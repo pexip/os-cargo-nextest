@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, GENERIC_READ, HANDLE,
+    CloseHandle, DuplicateHandle, LocalFree, DUPLICATE_SAME_ACCESS, GENERIC_READ, HANDLE,
     INVALID_HANDLE_VALUE, MAX_PATH, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
@@ -20,7 +20,6 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Environment::GetCommandLineW;
 use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
-use windows_sys::Win32::System::Memory::LocalFree;
 use windows_sys::Win32::System::Threading::{
     CreateProcessA, ExitProcess, GetCurrentProcess, WaitForSingleObject, CREATE_NO_WINDOW,
     INFINITE, PROCESS_INFORMATION, STARTUPINFOA,
@@ -235,7 +234,7 @@ fn schedule_self_deletion_on_shutdown(
 // This creates a temporary executable with a random name in the given directory and
 // the provided suffix.
 fn get_temp_executable_name(base: &Path, suffix: &str) -> PathBuf {
-    let rng = fastrand::Rng::new();
+    let mut rng = fastrand::Rng::new();
     let mut file_name = String::new();
     file_name.push('.');
 
@@ -273,9 +272,8 @@ fn get_directory_of(p: &Path) -> Result<&Path, io::Error> {
 ///    actually shuts down.
 /// 4. In `self_delete_on_init` spawn a dummy process so that windows deletes the
 ///    copy too.
-pub fn self_delete(protected_path: Option<&Path>) -> Result<(), io::Error> {
-    let exe = env::current_exe()?.canonicalize()?;
-    schedule_self_deletion_on_shutdown(&exe, protected_path)?;
+pub fn self_delete(exe: &Path, protected_path: Option<&Path>) -> Result<(), io::Error> {
+    schedule_self_deletion_on_shutdown(exe, protected_path)?;
     Ok(())
 }
 

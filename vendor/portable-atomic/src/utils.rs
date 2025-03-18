@@ -47,7 +47,10 @@ macro_rules! doc_comment {
 #[cfg(any(
     target_arch = "aarch64",
     target_arch = "arm",
+    target_arch = "arm64ec",
     target_arch = "powerpc64",
+    target_arch = "riscv32",
+    target_arch = "riscv64",
     all(target_arch = "x86_64", not(any(target_env = "sgx", miri))),
 ))]
 macro_rules! ifunc {
@@ -80,7 +83,10 @@ macro_rules! ifunc {
 #[cfg(any(
     target_arch = "aarch64",
     target_arch = "arm",
+    target_arch = "arm64ec",
     target_arch = "powerpc64",
+    target_arch = "riscv32",
+    target_arch = "riscv64",
     all(target_arch = "x86_64", not(any(target_env = "sgx", miri))),
 ))]
 macro_rules! fn_alias {
@@ -114,14 +120,14 @@ macro_rules! const_fn {
     (
         const_if: #[cfg($($cfg:tt)+)];
         $(#[$($attr:tt)*])*
-        $vis:vis const fn $($rest:tt)*
+        $vis:vis const $($rest:tt)*
     ) => {
         #[cfg($($cfg)+)]
         $(#[$($attr)*])*
-        $vis const fn $($rest)*
+        $vis const $($rest)*
         #[cfg(not($($cfg)+))]
         $(#[$($attr)*])*
-        $vis fn $($rest)*
+        $vis $($rest)*
     };
 }
 
@@ -130,14 +136,14 @@ macro_rules! const_fn {
 macro_rules! impl_debug_and_serde {
     ($atomic_type:ident) => {
         impl fmt::Debug for $atomic_type {
-            #[allow(clippy::missing_inline_in_public_items)] // fmt is not hot path
+            #[inline] // fmt is not hot path, but #[inline] on fmt seems to still be useful: https://github.com/rust-lang/rust/pull/117727
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                // std atomic types use Relaxed in Debug::fmt: https://github.com/rust-lang/rust/blob/1.70.0/library/core/src/sync/atomic.rs#L2024
+                // std atomic types use Relaxed in Debug::fmt: https://github.com/rust-lang/rust/blob/1.80.0/library/core/src/sync/atomic.rs#L2166
                 fmt::Debug::fmt(&self.load(Ordering::Relaxed), f)
             }
         }
         #[cfg(feature = "serde")]
-        #[cfg_attr(portable_atomic_doc_cfg, doc(cfg(feature = "serde")))]
+        #[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
         impl serde::ser::Serialize for $atomic_type {
             #[allow(clippy::missing_inline_in_public_items)] // serde doesn't use inline on std atomic's Serialize/Deserialize impl
             fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -149,7 +155,7 @@ macro_rules! impl_debug_and_serde {
             }
         }
         #[cfg(feature = "serde")]
-        #[cfg_attr(portable_atomic_doc_cfg, doc(cfg(feature = "serde")))]
+        #[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
         impl<'de> serde::de::Deserialize<'de> for $atomic_type {
             #[allow(clippy::missing_inline_in_public_items)] // serde doesn't use inline on std atomic's Serialize/Deserialize impl
             fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -163,7 +169,7 @@ macro_rules! impl_debug_and_serde {
 }
 
 // We do not provide `nand` because it cannot be optimized on neither x86 nor MSP430.
-// https://godbolt.org/z/7TzjKqYvE
+// https://godbolt.org/z/ahWejchbT
 macro_rules! impl_default_no_fetch_ops {
     ($atomic_type:ident, bool) => {
         impl $atomic_type {
@@ -184,7 +190,7 @@ macro_rules! impl_default_no_fetch_ops {
             }
         }
     };
-    ($atomic_type:ident, $int_type:ident) => {
+    ($atomic_type:ident, $int_type:ty) => {
         impl $atomic_type {
             #[inline]
             #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
@@ -215,7 +221,7 @@ macro_rules! impl_default_no_fetch_ops {
     };
 }
 macro_rules! impl_default_bit_opts {
-    ($atomic_type:ident, $int_type:ident) => {
+    ($atomic_type:ident, $int_type:ty) => {
         impl $atomic_type {
             #[inline]
             #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
@@ -246,7 +252,24 @@ macro_rules! items {
     };
 }
 
-// https://github.com/rust-lang/rust/blob/1.70.0/library/core/src/sync/atomic.rs#L3155
+#[allow(dead_code)]
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+// Stable version of https://doc.rust-lang.org/nightly/std/hint/fn.assert_unchecked.html.
+// TODO: use real core::hint::assert_unchecked on 1.81+ https://github.com/rust-lang/rust/pull/123588
+#[inline(always)]
+#[cfg_attr(all(debug_assertions, not(portable_atomic_no_track_caller)), track_caller)]
+pub(crate) unsafe fn assert_unchecked(cond: bool) {
+    if !cond {
+        if cfg!(debug_assertions) {
+            unreachable!()
+        } else {
+            // SAFETY: the caller promised `cond` is true.
+            unsafe { core::hint::unreachable_unchecked() }
+        }
+    }
+}
+
+// https://github.com/rust-lang/rust/blob/1.80.0/library/core/src/sync/atomic.rs#L3294
 #[inline]
 #[cfg_attr(all(debug_assertions, not(portable_atomic_no_track_caller)), track_caller)]
 pub(crate) fn assert_load_ordering(order: Ordering) {
@@ -254,11 +277,11 @@ pub(crate) fn assert_load_ordering(order: Ordering) {
         Ordering::Acquire | Ordering::Relaxed | Ordering::SeqCst => {}
         Ordering::Release => panic!("there is no such thing as a release load"),
         Ordering::AcqRel => panic!("there is no such thing as an acquire-release load"),
-        _ => unreachable!("{:?}", order),
+        _ => unreachable!(),
     }
 }
 
-// https://github.com/rust-lang/rust/blob/1.70.0/library/core/src/sync/atomic.rs#L3140
+// https://github.com/rust-lang/rust/blob/1.80.0/library/core/src/sync/atomic.rs#L3279
 #[inline]
 #[cfg_attr(all(debug_assertions, not(portable_atomic_no_track_caller)), track_caller)]
 pub(crate) fn assert_store_ordering(order: Ordering) {
@@ -266,11 +289,11 @@ pub(crate) fn assert_store_ordering(order: Ordering) {
         Ordering::Release | Ordering::Relaxed | Ordering::SeqCst => {}
         Ordering::Acquire => panic!("there is no such thing as an acquire store"),
         Ordering::AcqRel => panic!("there is no such thing as an acquire-release store"),
-        _ => unreachable!("{:?}", order),
+        _ => unreachable!(),
     }
 }
 
-// https://github.com/rust-lang/rust/blob/1.70.0/library/core/src/sync/atomic.rs#L3221
+// https://github.com/rust-lang/rust/blob/1.80.0/library/core/src/sync/atomic.rs#L3360
 #[inline]
 #[cfg_attr(all(debug_assertions, not(portable_atomic_no_track_caller)), track_caller)]
 pub(crate) fn assert_compare_exchange_ordering(success: Ordering, failure: Ordering) {
@@ -280,13 +303,13 @@ pub(crate) fn assert_compare_exchange_ordering(success: Ordering, failure: Order
         | Ordering::Relaxed
         | Ordering::Release
         | Ordering::SeqCst => {}
-        _ => unreachable!("{:?}, {:?}", success, failure),
+        _ => unreachable!(),
     }
     match failure {
         Ordering::Acquire | Ordering::Relaxed | Ordering::SeqCst => {}
         Ordering::Release => panic!("there is no such thing as a release failure ordering"),
         Ordering::AcqRel => panic!("there is no such thing as an acquire-release failure ordering"),
-        _ => unreachable!("{:?}, {:?}", success, failure),
+        _ => unreachable!(),
     }
 }
 
@@ -326,7 +349,9 @@ pub(crate) fn zero_extend64_ptr(v: *mut ()) -> core::mem::MaybeUninit<u64> {
 #[allow(dead_code)]
 #[cfg(any(
     target_arch = "aarch64",
+    target_arch = "arm64ec",
     target_arch = "powerpc64",
+    target_arch = "riscv64",
     target_arch = "s390x",
     target_arch = "x86_64",
 ))]
@@ -341,7 +366,7 @@ pub(crate) union U128 {
     pub(crate) pair: Pair<u64>,
 }
 #[allow(dead_code)]
-#[cfg(target_arch = "arm")]
+#[cfg(any(target_arch = "arm", target_arch = "riscv32"))]
 /// A 64-bit value represented as a pair of 32-bit values.
 ///
 /// This type is `#[repr(C)]`, both fields have the same in-memory representation
@@ -357,35 +382,55 @@ pub(crate) union U64 {
 #[repr(C)]
 pub(crate) struct Pair<T: Copy> {
     // little endian order
-    #[cfg(any(target_endian = "little", target_arch = "aarch64", target_arch = "arm"))]
+    #[cfg(any(
+        target_endian = "little",
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "arm64ec",
+    ))]
     pub(crate) lo: T,
     pub(crate) hi: T,
     // big endian order
-    #[cfg(not(any(target_endian = "little", target_arch = "aarch64", target_arch = "arm")))]
+    #[cfg(not(any(
+        target_endian = "little",
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "arm64ec",
+    )))]
     pub(crate) lo: T,
 }
 
-#[allow(dead_code)]
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 type MinWord = u32;
-#[cfg(target_arch = "riscv32")]
-type RegSize = u32;
-#[cfg(target_arch = "riscv64")]
-type RegSize = u64;
-// Adapted from https://github.com/taiki-e/atomic-maybe-uninit/blob/v0.3.0/src/utils.rs#L210.
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+type RetInt = u32;
+// Adapted from https://github.com/taiki-e/atomic-maybe-uninit/blob/v0.3.4/src/utils.rs#L255.
 // Helper for implementing sub-word atomic operations using word-sized LL/SC loop or CAS loop.
 //
-// Refs: https://github.com/llvm/llvm-project/blob/llvmorg-17.0.0-rc2/llvm/lib/CodeGen/AtomicExpandPass.cpp#L699
+// Refs: https://github.com/llvm/llvm-project/blob/llvmorg-19.1.0/llvm/lib/CodeGen/AtomicExpandPass.cpp#L737
 // (aligned_ptr, shift, mask)
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 #[allow(dead_code)]
 #[inline]
-pub(crate) fn create_sub_word_mask_values<T>(ptr: *mut T) -> (*mut MinWord, RegSize, RegSize) {
+pub(crate) fn create_sub_word_mask_values<T>(ptr: *mut T) -> (*mut MinWord, RetInt, RetInt) {
     use core::mem;
+    // RISC-V, MIPS, SPARC, LoongArch, Xtensa: shift amount of 32-bit shift instructions is 5 bits unsigned (0-31).
+    // PowerPC, C-SKY: shift amount of 32-bit shift instructions is 6 bits unsigned (0-63) and shift amount 32-63 means "clear".
+    // Arm: shift amount of 32-bit shift instructions is 8 bits unsigned (0-255).
+    // Hexagon: shift amount of 32-bit shift instructions is 7 bits signed (-64-63) and negative shift amount means "reverse the direction of the shift".
+    // (On s390x, we don't use the mask returned from this function.)
     const SHIFT_MASK: bool = !cfg!(any(
+        target_arch = "loongarch64",
+        target_arch = "mips",
+        target_arch = "mips32r6",
+        target_arch = "mips64",
+        target_arch = "mips64r6",
         target_arch = "riscv32",
         target_arch = "riscv64",
-        target_arch = "loongarch64",
         target_arch = "s390x",
+        target_arch = "sparc",
+        target_arch = "sparc64",
+        target_arch = "xtensa",
     ));
     let ptr_mask = mem::size_of::<MinWord>() - 1;
     let aligned_ptr = strict::with_addr(ptr, ptr as usize & !ptr_mask) as *mut MinWord;
@@ -400,35 +445,28 @@ pub(crate) fn create_sub_word_mask_values<T>(ptr: *mut T) -> (*mut MinWord, RegS
     } else {
         (ptr_lsb ^ (mem::size_of::<MinWord>() - mem::size_of::<T>())).wrapping_mul(8)
     };
-    let mut mask: RegSize = (1 << (mem::size_of::<T>() * 8)) - 1; // !(0 as T) as RegSize
+    let mut mask: RetInt = (1 << (mem::size_of::<T>() * 8)) - 1; // !(0 as T) as RetInt
     if SHIFT_MASK {
         mask <<= shift;
     }
-    (aligned_ptr, shift as RegSize, mask)
+    (aligned_ptr, shift as RetInt, mask)
 }
 
-/// Emulate strict provenance.
-///
-/// Once strict_provenance is stable, migrate to the standard library's APIs.
+// TODO: use stabilized core::ptr strict_provenance helpers https://github.com/rust-lang/rust/pull/130350
 #[cfg(any(miri, target_arch = "riscv32", target_arch = "riscv64"))]
 #[allow(dead_code)]
 pub(crate) mod strict {
-    /// Replace the address portion of this pointer with a new address.
     #[inline]
     #[must_use]
     pub(crate) fn with_addr<T>(ptr: *mut T, addr: usize) -> *mut T {
-        // FIXME(strict_provenance_magic): I am magic and should be a compiler intrinsic.
-        //
-        // In the mean-time, this operation is defined to be "as if" it was
-        // a wrapping_add, so we can emulate it as such. This should properly
-        // restore pointer provenance even under today's compiler.
+        // This should probably be an intrinsic to avoid doing any sort of arithmetic, but
+        // meanwhile, we can implement it with `wrapping_offset`, which preserves the pointer's
+        // provenance.
         let offset = addr.wrapping_sub(ptr as usize);
-
-        // This is the canonical desugaring of this operation.
         (ptr as *mut u8).wrapping_add(offset) as *mut T
     }
 
-    /// Run an operation of some kind on a pointer.
+    #[cfg(miri)]
     #[inline]
     #[must_use]
     pub(crate) fn map_addr<T>(ptr: *mut T, f: impl FnOnce(usize) -> usize) -> *mut T {

@@ -11,12 +11,19 @@
 
 [package]
 edition = "2021"
+rust-version = "1.65"
 name = "security-framework-sys"
-version = "2.10.0"
+version = "2.14.0"
 authors = [
     "Steven Fackler <sfackler@gmail.com>",
     "Kornel <kornel@geekhood.net>",
 ]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Apple `Security.framework` low-level FFI bindings"
 homepage = "https://lib.rs/crates/security-framework-sys"
 readme = "README.md"
@@ -40,11 +47,15 @@ targets = [
     "aarch64-apple-ios",
 ]
 
+[lib]
+name = "security_framework_sys"
+path = "src/lib.rs"
+
 [dependencies.core-foundation-sys]
-version = "0.8.3"
+version = "0.8.6"
 
 [dependencies.libc]
-version = "0.2.139"
+version = "0.2.150"
 
 [features]
 OSX_10_10 = ["OSX_10_9"]
@@ -54,7 +65,7 @@ OSX_10_13 = ["OSX_10_12"]
 OSX_10_14 = ["OSX_10_13"]
 OSX_10_15 = ["OSX_10_14"]
 OSX_10_9 = []
-default = ["OSX_10_11"]
+default = ["OSX_10_12"]
 
 [badges.maintenance]
 status = "looking-for-maintainer"

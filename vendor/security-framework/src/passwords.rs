@@ -160,7 +160,9 @@ fn get_password_and_release(data: CFTypeRef) -> Result<Vec<u8>> {
         if type_id == CFData::type_id() {
             let val = unsafe { CFData::wrap_under_create_rule(data as CFDataRef) };
             let mut vec = Vec::new();
-            vec.extend_from_slice(val.bytes());
+            if val.len() > 0 {
+                vec.extend_from_slice(val.bytes());
+            }
             return Ok(vec);
         }
         // unexpected: we got a reference to some other type.
@@ -299,6 +301,10 @@ mod test {
             SecProtocolType::HTTP,
             SecAuthenticationType::Any,
         );
+
+        // cleanup after failed test
+        let _ = delete_internet_password(server, domain, account, path, port, protocol, auth);
+
         set_internet_password(
             server,
             domain,

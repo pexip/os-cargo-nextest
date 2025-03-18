@@ -10,7 +10,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::{char, mem::MaybeUninit};
 
-use encode_unicode::error::InvalidUtf16Tuple;
+use encode_unicode::error::Utf16TupleError;
 use encode_unicode::CharExt;
 use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE, MAX_PATH};
 use windows_sys::Win32::Storage::FileSystem::{FileNameInfo, GetFileInformationByHandleEx};
@@ -18,8 +18,8 @@ use windows_sys::Win32::System::Console::{
     FillConsoleOutputAttribute, FillConsoleOutputCharacterA, GetConsoleCursorInfo, GetConsoleMode,
     GetConsoleScreenBufferInfo, GetNumberOfConsoleInputEvents, GetStdHandle, ReadConsoleInputW,
     SetConsoleCursorInfo, SetConsoleCursorPosition, SetConsoleMode, SetConsoleTitleW,
-    CONSOLE_CURSOR_INFO, CONSOLE_SCREEN_BUFFER_INFO, COORD, INPUT_RECORD, KEY_EVENT,
-    KEY_EVENT_RECORD, STD_ERROR_HANDLE, STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    CONSOLE_CURSOR_INFO, CONSOLE_SCREEN_BUFFER_INFO, COORD, INPUT_RECORD, INPUT_RECORD_0,
+    KEY_EVENT, KEY_EVENT_RECORD, STD_ERROR_HANDLE, STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 
@@ -222,7 +222,7 @@ pub fn clear_line(out: &Term) -> io::Result<()> {
                 Y: csbi.dwCursorPosition.Y,
             };
             let mut written = 0;
-            FillConsoleOutputCharacterA(hand, b' ', width as u32, pos, &mut written);
+            FillConsoleOutputCharacterA(hand, b' ' as i8, width as u32, pos, &mut written);
             FillConsoleOutputAttribute(hand, csbi.wAttributes, width as u32, pos, &mut written);
             SetConsoleCursorPosition(hand, pos);
         }
@@ -242,7 +242,7 @@ pub fn clear_chars(out: &Term, n: usize) -> io::Result<()> {
                 Y: csbi.dwCursorPosition.Y,
             };
             let mut written = 0;
-            FillConsoleOutputCharacterA(hand, b' ', width as u32, pos, &mut written);
+            FillConsoleOutputCharacterA(hand, b' ' as i8, width as u32, pos, &mut written);
             FillConsoleOutputAttribute(hand, csbi.wAttributes, width as u32, pos, &mut written);
             SetConsoleCursorPosition(hand, pos);
         }
@@ -259,7 +259,7 @@ pub fn clear_screen(out: &Term) -> io::Result<()> {
             let cells = csbi.dwSize.X as u32 * csbi.dwSize.Y as u32; // as u32, or else this causes stack overflows.
             let pos = COORD { X: 0, Y: 0 };
             let mut written = 0;
-            FillConsoleOutputCharacterA(hand, b' ', cells, pos, &mut written); // cells as u32 no longer needed.
+            FillConsoleOutputCharacterA(hand, b' ' as i8, cells, pos, &mut written); // cells as u32 no longer needed.
             FillConsoleOutputAttribute(hand, csbi.wAttributes, cells, pos, &mut written);
             SetConsoleCursorPosition(hand, pos);
         }
@@ -280,7 +280,7 @@ pub fn clear_to_end_of_screen(out: &Term) -> io::Result<()> {
                 Y: csbi.dwCursorPosition.Y,
             };
             let mut written = 0;
-            FillConsoleOutputCharacterA(hand, b' ', cells, pos, &mut written); // cells as u32 no longer needed.
+            FillConsoleOutputCharacterA(hand, b' ' as i8, cells, pos, &mut written); // cells as u32 no longer needed.
             FillConsoleOutputAttribute(hand, csbi.wAttributes, cells, pos, &mut written);
             SetConsoleCursorPosition(hand, pos);
         }
@@ -398,13 +398,13 @@ pub fn read_single_key(_ctrlc_key: bool) -> io::Result<Key> {
                 }
             }
             // This is part of a surrogate pair. Try to read the second half.
-            Err(InvalidUtf16Tuple::MissingSecond) => {
+            Err(Utf16TupleError::MissingSecond) => {
                 // Confirm that there is a next character to read.
                 if get_key_event_count()? == 0 {
                     let message = format!(
                         "Read invlid utf16 {}: {}",
                         unicode_char,
-                        InvalidUtf16Tuple::MissingSecond
+                        Utf16TupleError::MissingSecond
                     );
                     return Err(io::Error::new(io::ErrorKind::InvalidData, message));
                 }
@@ -490,7 +490,7 @@ fn read_key_event() -> io::Result<KEY_EVENT_RECORD> {
             continue;
         }
 
-        key_event = unsafe { mem::transmute(buffer.Event) };
+        key_event = unsafe { mem::transmute::<INPUT_RECORD_0, KEY_EVENT_RECORD>(buffer.Event) };
 
         if key_event.bKeyDown == 0 {
             // This is a key being released; ignore it.

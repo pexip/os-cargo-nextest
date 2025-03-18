@@ -173,7 +173,7 @@ impl<'de> de::Deserializer<'de> for Value {
 
 struct StrDeserializer<'a>(&'a str);
 
-impl<'de, 'a> de::Deserializer<'de> for StrDeserializer<'a> {
+impl<'de> de::Deserializer<'de> for StrDeserializer<'_> {
     type Error = ConfigError;
 
     #[inline]
@@ -269,15 +269,15 @@ struct EnumAccess {
 }
 
 impl EnumAccess {
-    fn variant_deserializer(&self, name: &str) -> Result<StrDeserializer> {
+    fn variant_deserializer(&self, name: &str) -> Result<StrDeserializer<'_>> {
         self.variants
             .iter()
-            .find(|&&s| s.to_lowercase() == name.to_lowercase()) // changing to lowercase will enable deserialization of lowercase values to enums
+            .find(|&&s| s == name)
             .map(|&s| StrDeserializer(s))
             .ok_or_else(|| self.no_constructor_error(name))
     }
 
-    fn table_deserializer(&self, table: &Table) -> Result<StrDeserializer> {
+    fn table_deserializer(&self, table: &Table) -> Result<StrDeserializer<'_>> {
         if table.len() == 1 {
             self.variant_deserializer(table.iter().next().unwrap().0)
         } else {

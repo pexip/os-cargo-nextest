@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-// AtomicF{32,64} implementation based on AtomicU{32,64}.
-//
-// This module provides atomic float implementations using atomic integer.
-//
-// Note that most of `fetch_*` operations of atomic floats are implemented using
-// CAS loops, which can be slower than equivalent operations of atomic integers.
-//
-// GPU targets have atomic instructions for float, so GPU targets will use
-// architecture-specific implementations instead of this implementation in the
-// future: https://github.com/taiki-e/portable-atomic/issues/34
+/*
+AtomicF{32,64} implementation based on AtomicU{32,64}.
+
+This module provides atomic float implementations using atomic integer.
+
+Note that most of `fetch_*` operations of atomic floats are implemented using
+CAS loops, which can be slower than equivalent operations of atomic integers.
+
+GPU targets have atomic instructions for float, so GPU targets will use
+architecture-specific implementations instead of this implementation in the
+future: https://github.com/taiki-e/portable-atomic/issues/34 / https://github.com/taiki-e/portable-atomic/pull/45
+*/
+
+// TODO: fetch_{minimum,maximum}* https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2024/p3008r2.html / https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2024/p0493r5.pdf
 
 #![cfg_attr(
     all(target_pointer_width = "16", not(feature = "fallback")),
@@ -42,22 +46,8 @@ macro_rules! atomic_float {
             pub(crate) fn is_lock_free() -> bool {
                 crate::$atomic_int_type::is_lock_free()
             }
-            #[inline]
-            pub(crate) const fn is_always_lock_free() -> bool {
-                crate::$atomic_int_type::is_always_lock_free()
-            }
-
-            #[inline]
-            pub(crate) fn get_mut(&mut self) -> &mut $float_type {
-                // SAFETY: the mutable reference guarantees unique ownership.
-                // (UnsafeCell::get_mut requires Rust 1.50)
-                unsafe { &mut *self.v.get() }
-            }
-
-            #[inline]
-            pub(crate) fn into_inner(self) -> $float_type {
-                self.v.into_inner()
-            }
+            pub(crate) const IS_ALWAYS_LOCK_FREE: bool =
+                crate::$atomic_int_type::is_always_lock_free();
 
             #[inline]
             #[cfg_attr(
@@ -79,7 +69,7 @@ macro_rules! atomic_float {
 
             const_fn! {
                 const_if: #[cfg(not(portable_atomic_no_const_raw_ptr_deref))];
-                #[inline]
+                #[inline(always)]
                 pub(crate) const fn as_bits(&self) -> &crate::$atomic_int_type {
                     // SAFETY: $atomic_type and $atomic_int_type have the same layout,
                     // and there is no concurrent access to the value that does not go through this method.
@@ -93,7 +83,7 @@ macro_rules! atomic_float {
             }
         }
 
-        cfg_has_atomic_cas! {
+        cfg_has_atomic_cas_or_amo32! {
         impl $atomic_type {
             #[inline]
             #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
@@ -101,6 +91,7 @@ macro_rules! atomic_float {
                 $float_type::from_bits(self.as_bits().swap(val.to_bits(), order))
             }
 
+            cfg_has_atomic_cas! {
             #[inline]
             #[cfg_attr(
                 any(all(debug_assertions, not(portable_atomic_no_track_caller)), miri),
@@ -188,7 +179,7 @@ macro_rules! atomic_float {
             pub(crate) fn fetch_min(&self, val: $float_type, order: Ordering) -> $float_type {
                 self.fetch_update_(order, |x| x.min(val))
             }
-
+            } // cfg_has_atomic_cas!
             #[inline]
             #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
             pub(crate) fn fetch_neg(&self, order: Ordering) -> $float_type {
@@ -203,7 +194,7 @@ macro_rules! atomic_float {
                 $float_type::from_bits(self.as_bits().fetch_and(ABS_MASK, order))
             }
         }
-        } // cfg_has_atomic_cas!
+        } // cfg_has_atomic_cas_or_amo32!
     };
 }
 

@@ -11,14 +11,20 @@
 
 [package]
 edition = "2021"
-rust-version = "1.73"
+rust-version = "1.78"
 name = "guppy"
-version = "0.17.5"
+version = "0.17.17"
 authors = [
     "Rain <rain1@fb.com>",
     "Brandon Williams <bmwill@fb.com>",
 ]
+build = false
 exclude = ["README.tpl"]
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Track and query Cargo dependency graphs."
 documentation = "https://docs.rs/guppy"
 readme = "README.md"
@@ -41,90 +47,8 @@ repository = "https://github.com/guppy-rs/guppy"
 all-features = true
 rustdoc-args = ["--cfg=doc_cfg"]
 
-[dependencies.ahash]
-version = "0.8.7"
-
-[dependencies.camino]
-version = "1.1.6"
-
-[dependencies.cargo_metadata]
-version = "0.18.1"
-
-[dependencies.cfg-if]
-version = "1.0.0"
-
-[dependencies.debug-ignore]
-version = "1.0.5"
-
-[dependencies.fixedbitset]
-version = "0.4.2"
-default-features = false
-
-[dependencies.guppy-summaries]
-version = "0.7.1"
-optional = true
-
-[dependencies.guppy-workspace-hack]
-version = "0.1.0"
-
-[dependencies.indexmap]
-version = "2.2.2"
-
-[dependencies.itertools]
-version = "0.12.1"
-
-[dependencies.nested]
-version = "0.1.1"
-
-[dependencies.once_cell]
-version = "1.19.0"
-
-[dependencies.pathdiff]
-version = "0.2.1"
-features = ["camino"]
-
-[dependencies.petgraph]
-version = "0.6.4"
-default-features = false
-
-[dependencies.proptest]
-version = "1.4.0"
-optional = true
-
-[dependencies.proptest-derive]
-version = "0.4.0"
-optional = true
-
-[dependencies.rayon]
-version = "1.8.1"
-optional = true
-
-[dependencies.semver]
-version = "1.0.21"
-
-[dependencies.serde]
-version = "1.0.196"
-features = ["derive"]
-
-[dependencies.serde_json]
-version = "1.0.113"
-
-[dependencies.smallvec]
-version = "1.13.1"
-
-[dependencies.static_assertions]
-version = "1.1.0"
-
-[dependencies.target-spec]
-version = "3.1.0"
-
-[dependencies.toml]
-version = "0.5.11"
-features = ["preserve_order"]
-optional = true
-
-[dev-dependencies.pretty_assertions]
-version = "1.4.0"
+[badges.maintenance]
+status = "actively-developed"
 
 [features]
 proptest1 = [
@@ -139,5 +63,123 @@ summaries = [
     "toml",
 ]
 
-[badges.maintenance]
-status = "actively-developed"
+[lib]
+name = "guppy"
+path = "src/lib.rs"
+
+[[example]]
+name = "deps"
+path = "examples/deps.rs"
+
+[[example]]
+name = "print_by_level"
+path = "examples/print_by_level.rs"
+
+[[example]]
+name = "print_dot"
+path = "examples/print_dot.rs"
+
+[[example]]
+name = "remove_dev_only"
+path = "examples/remove_dev_only.rs"
+
+[[example]]
+name = "topo_sort"
+path = "examples/topo_sort.rs"
+
+[[test]]
+name = "graph-tests"
+path = "tests/graph-tests/main.rs"
+
+[dependencies.ahash]
+version = "0.8.11"
+
+[dependencies.camino]
+version = "1.1.9"
+
+[dependencies.cargo_metadata]
+version = "0.19.1"
+
+[dependencies.cfg-if]
+version = "1.0.0"
+
+[dependencies.debug-ignore]
+version = "1.0.5"
+
+[dependencies.fixedbitset]
+version = "0.5.7"
+default-features = false
+
+[dependencies.guppy-summaries]
+version = "0.7.1"
+optional = true
+
+[dependencies.guppy-workspace-hack]
+version = "0.1.0"
+
+[dependencies.indexmap]
+version = "2.7.1"
+
+[dependencies.itertools]
+version = "0.14.0"
+
+[dependencies.nested]
+version = "0.1.1"
+
+[dependencies.once_cell]
+version = "1.20.3"
+
+[dependencies.pathdiff]
+version = "0.2.3"
+features = ["camino"]
+
+[dependencies.petgraph]
+version = "0.7.1"
+default-features = false
+
+[dependencies.proptest]
+version = "1.6.0"
+optional = true
+
+[dependencies.proptest-derive]
+version = "0.5.1"
+optional = true
+
+[dependencies.rayon]
+version = "1.10.0"
+optional = true
+
+[dependencies.semver]
+version = "1.0.25"
+
+[dependencies.serde]
+version = "1.0.218"
+features = ["derive"]
+
+[dependencies.serde_json]
+version = "1.0.139"
+
+[dependencies.smallvec]
+version = "1.14.0"
+
+[dependencies.static_assertions]
+version = "1.1.0"
+
+[dependencies.target-spec]
+version = "3.4.2"
+
+[dependencies.toml]
+version = "0.5.11"
+features = ["preserve_order"]
+optional = true
+
+[dev-dependencies.pretty_assertions]
+version = "1.4.1"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = [
+    "cfg(doc_cfg)",
+    "cfg(guppy_nightly)",
+]

@@ -2,15 +2,14 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::{
-    graph::{
-        cargo_version_matches,
-        feature::{FeatureGraphImpl, FeatureId, FeatureLabel, FeatureNode},
-        BuildTarget, BuildTargetId, BuildTargetImpl, BuildTargetKind, Cycles, DependencyDirection,
-        OwnedBuildTargetId, PackageIx, PackageQuery, PackageSet,
-    },
-    petgraph_support::{scc::Sccs, topo::TopoWithCycles, IxBitSet},
-    platform::{EnabledTernary, PlatformSpec, PlatformStatus, PlatformStatusImpl},
     CargoMetadata, DependencyKind, Error, JsonValue, MetadataCommand, PackageId,
+    graph::{
+        BuildTarget, BuildTargetId, BuildTargetImpl, BuildTargetKind, Cycles, DependencyDirection,
+        OwnedBuildTargetId, PackageIx, PackageQuery, PackageSet, cargo_version_matches,
+        feature::{FeatureGraphImpl, FeatureId, FeatureLabel, FeatureNode},
+    },
+    petgraph_support::{IxBitSet, scc::Sccs, topo::TopoWithCycles},
+    platform::{EnabledTernary, PlatformSpec, PlatformStatus, PlatformStatusImpl},
 };
 use ahash::AHashMap;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -18,7 +17,7 @@ use fixedbitset::FixedBitSet;
 use indexmap::{IndexMap, IndexSet};
 use once_cell::sync::OnceCell;
 use petgraph::{
-    algo::{has_path_connecting, DfsSpace},
+    algo::{DfsSpace, has_path_connecting},
     graph::EdgeReference,
     prelude::*,
     visit::EdgeFiltered,
@@ -239,12 +238,12 @@ impl PackageGraph {
     }
 
     /// Returns an iterator over all the package IDs in this graph.
-    pub fn package_ids(&self) -> impl Iterator<Item = &PackageId> + ExactSizeIterator {
+    pub fn package_ids(&self) -> impl ExactSizeIterator<Item = &PackageId> {
         self.data.package_ids()
     }
 
     /// Returns an iterator over all the packages in this graph.
-    pub fn packages(&self) -> impl Iterator<Item = PackageMetadata> + ExactSizeIterator {
+    pub fn packages(&self) -> impl ExactSizeIterator<Item = PackageMetadata> {
         self.data
             .packages
             .values()
@@ -425,7 +424,7 @@ impl PackageGraph {
 
 impl PackageGraphData {
     /// Returns an iterator over all the package IDs in this graph.
-    pub fn package_ids(&self) -> impl Iterator<Item = &PackageId> + ExactSizeIterator {
+    pub fn package_ids(&self) -> impl ExactSizeIterator<Item = &PackageId> {
         self.packages.keys()
     }
 
@@ -518,7 +517,7 @@ impl<'g> Workspace<'g> {
     }
 
     /// Returns an iterator over package metadatas, sorted by the path they're in.
-    pub fn iter(&self) -> impl Iterator<Item = PackageMetadata<'g>> + ExactSizeIterator {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = PackageMetadata<'g>> {
         self.iter_by_path().map(|(_, package)| package)
     }
 
@@ -526,7 +525,7 @@ impl<'g> Workspace<'g> {
     /// they're in.
     pub fn iter_by_path(
         &self,
-    ) -> impl Iterator<Item = (&'g Utf8Path, PackageMetadata<'g>)> + ExactSizeIterator {
+    ) -> impl ExactSizeIterator<Item = (&'g Utf8Path, PackageMetadata<'g>)> {
         let graph = self.graph;
         self.inner.members_by_path.iter().map(move |(path, id)| {
             (
@@ -537,9 +536,7 @@ impl<'g> Workspace<'g> {
     }
 
     /// Returns an iterator over workspace names and package metadatas, sorted by names.
-    pub fn iter_by_name(
-        &self,
-    ) -> impl Iterator<Item = (&'g str, PackageMetadata<'g>)> + ExactSizeIterator {
+    pub fn iter_by_name(&self) -> impl ExactSizeIterator<Item = (&'g str, PackageMetadata<'g>)> {
         let graph = self.graph;
         self.inner
             .members_by_name
@@ -549,7 +546,7 @@ impl<'g> Workspace<'g> {
 
     /// Returns an iterator over package IDs for workspace members. The package IDs will be returned
     /// in the same order as `members`, sorted by the path they're in.
-    pub fn member_ids(&self) -> impl Iterator<Item = &'g PackageId> + ExactSizeIterator {
+    pub fn member_ids(&self) -> impl ExactSizeIterator<Item = &'g PackageId> {
         self.inner.members_by_path.values()
     }
 
@@ -697,7 +694,7 @@ pub struct PackageMetadata<'g> {
     inner: &'g PackageMetadataImpl,
 }
 
-impl<'g> fmt::Debug for PackageMetadata<'g> {
+impl fmt::Debug for PackageMetadata<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("PackageMetadata")
             .field("package_id", &self.id().repr())
@@ -1170,7 +1167,7 @@ pub(crate) enum FeatureIndexInPackage {
 }
 
 /// `PackageMetadata`'s `PartialEq` implementation uses pointer equality for the `PackageGraph`.
-impl<'g> PartialEq for PackageMetadata<'g> {
+impl PartialEq for PackageMetadata<'_> {
     fn eq(&self, other: &Self) -> bool {
         // Checking for the same package ix is enough as each package is guaranteed to be a 1:1 map
         // with ixs.
@@ -1178,7 +1175,7 @@ impl<'g> PartialEq for PackageMetadata<'g> {
     }
 }
 
-impl<'g> Eq for PackageMetadata<'g> {}
+impl Eq for PackageMetadata<'_> {}
 
 #[derive(Clone, Debug)]
 pub(crate) struct PackageMetadataImpl {
@@ -1328,7 +1325,7 @@ impl<'g> PackageSource<'g> {
     }
 }
 
-impl<'g> fmt::Display for PackageSource<'g> {
+impl fmt::Display for PackageSource<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             PackageSource::Workspace(path) => write!(f, "{}", path),
@@ -1365,6 +1362,27 @@ pub enum ExternalSource<'g> {
     /// );
     /// ```
     Registry(&'g str),
+
+    /// This is a registry source that uses the [sparse registry protocol][sparse], e.g. `"sparse+https://index.crates.io"`.
+    ///
+    /// The associated data is the part of the string after the initial `"sparse+"`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use guppy::graph::ExternalSource;
+    ///
+    /// let source = "sparse+https://index.crates.io";
+    /// let parsed = ExternalSource::new(source).expect("this source is understood by guppy");
+    ///
+    /// assert_eq!(
+    ///     parsed,
+    ///     ExternalSource::Sparse("https://index.crates.io"),
+    /// );
+    /// ```
+    ///
+    /// [sparse]: https://doc.rust-lang.org/cargo/reference/registry-index.html#sparse-protocol
+    Sparse(&'g str),
 
     /// This is a Git source.
     ///
@@ -1472,6 +1490,11 @@ impl<'g> ExternalSource<'g> {
     /// Used for matching with the `Registry` variant.
     pub const REGISTRY_PLUS: &'static str = "registry+";
 
+    /// The string `"sparse+"`.
+    ///
+    /// Also used for matching with the `Sparse` variant.
+    pub const SPARSE_PLUS: &'static str = "sparse+";
+
     /// The string `"git+"`.
     ///
     /// Used for matching with the `Git` variant.
@@ -1506,6 +1529,9 @@ impl<'g> ExternalSource<'g> {
         if let Some(registry) = source.strip_prefix(Self::REGISTRY_PLUS) {
             // A registry source.
             Some(ExternalSource::Registry(registry))
+        } else if let Some(sparse) = source.strip_prefix(Self::SPARSE_PLUS) {
+            // A sparse registry source.
+            Some(ExternalSource::Sparse(sparse))
         } else if let Some(rest) = source.strip_prefix(Self::GIT_PLUS) {
             // A Git source.
             // Look for a trailing #, which indicates the resolved revision.
@@ -1553,10 +1579,11 @@ impl<'g> ExternalSource<'g> {
 ///     "git+https://github.com/rust-lang/cargo.git?branch=main#0227f048fcb7c798026ede6cc20c92befc84c3a4",
 /// );
 /// ```
-impl<'g> fmt::Display for ExternalSource<'g> {
+impl fmt::Display for ExternalSource<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ExternalSource::Registry(url) => write!(f, "{}{}", Self::REGISTRY_PLUS, url),
+            ExternalSource::Sparse(url) => write!(f, "{}{}", Self::SPARSE_PLUS, url),
             ExternalSource::Git {
                 repository,
                 req,

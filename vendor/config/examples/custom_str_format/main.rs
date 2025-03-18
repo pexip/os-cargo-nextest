@@ -7,8 +7,8 @@ fn main() {
         .build();
 
     match config {
-        Ok(cfg) => println!("A config: {:#?}", cfg),
-        Err(e) => println!("An error: {}", e),
+        Ok(cfg) => println!("A config: {cfg:#?}"),
+        Err(e) => println!("An error: {e}"),
     }
 }
 
@@ -20,7 +20,7 @@ impl Format for MyFormat {
         &self,
         uri: Option<&String>,
         text: &str,
-    ) -> Result<Map<String, config::Value>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Map<String, Value>, Box<dyn std::error::Error + Send + Sync>> {
         // Let's assume our format is somewhat malformed, but this is fine
         // In real life anything can be used here - nom, serde or other.
         //
@@ -29,11 +29,11 @@ impl Format for MyFormat {
 
         if text == "good" {
             result.insert(
-                "key".to_string(),
+                "key".to_owned(),
                 Value::new(uri, ValueKind::String(text.into())),
             );
         } else {
-            println!("Something went wrong in {:?}", uri);
+            println!("Something went wrong in {uri:?}");
         }
 
         Ok(result)

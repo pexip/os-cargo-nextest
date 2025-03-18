@@ -1,6 +1,7 @@
 use std::path::Path;
 
 // all syntect imports are explicitly qualified, but their paths are shortened for convenience
+#[allow(clippy::module_inception)]
 mod syntect {
     pub(super) use syntect::{
         highlighting::{
@@ -19,7 +20,7 @@ use crate::{
 
 use super::BlankHighlighterState;
 
-/// Highlights miette [SourceCode] with the [syntect](https://docs.rs/syntect/latest/syntect/) highlighting crate.
+/// Highlights miette [`SpanContents`] with the [syntect](https://docs.rs/syntect/latest/syntect/) highlighting crate.
 ///
 /// Currently only 24-bit truecolor output is supported due to syntect themes
 /// representing color as RGBA.
@@ -80,7 +81,7 @@ impl SyntectHighlighter {
         )
     }
 
-    /// Determine syntect SyntaxReference to use for given SourceCode
+    /// Determine syntect [`SyntaxReference`] to use for given [`SpanContents`].
     fn detect_syntax(&self, contents: &dyn SpanContents<'_>) -> Option<&syntect::SyntaxReference> {
         // use language if given
         if let Some(language) = contents.language() {
@@ -96,7 +97,7 @@ impl SyntectHighlighter {
         }
         // finally, attempt to guess syntax based on first line
         return self.syntax_set.find_syntax_by_first_line(
-            &std::str::from_utf8(contents.data())
+            std::str::from_utf8(contents.data())
                 .ok()?
                 .split('\n')
                 .next()?,
@@ -104,7 +105,7 @@ impl SyntectHighlighter {
     }
 }
 
-/// Stateful highlighting iterator for [SyntectHighlighter]
+/// Stateful highlighting iterator for [`SyntectHighlighter`].
 #[derive(Debug)]
 pub(crate) struct SyntectHighlighterState<'h> {
     syntax_set: &'h syntect::SyntaxSet,
@@ -116,13 +117,13 @@ pub(crate) struct SyntectHighlighterState<'h> {
 
 impl<'h> HighlighterState for SyntectHighlighterState<'h> {
     fn highlight_line<'s>(&mut self, line: &'s str) -> Vec<Styled<&'s str>> {
-        if let Ok(ops) = self.parse_state.parse_line(line, &self.syntax_set) {
+        if let Ok(ops) = self.parse_state.parse_line(line, self.syntax_set) {
             let use_bg_color = self.use_bg_color;
             syntect::HighlightIterator::new(
                 &mut self.highlight_state,
                 &ops,
                 line,
-                &mut self.highlighter,
+                &self.highlighter,
             )
             .map(|(style, str)| (convert_style(style, use_bg_color).style(str)))
             .collect()
@@ -132,7 +133,7 @@ impl<'h> HighlighterState for SyntectHighlighterState<'h> {
     }
 }
 
-/// Convert syntect [syntect::Style] into owo_colors [Style] */
+/// Convert syntect [`syntect::Style`] into `owo_colors` [`Style`]
 #[inline]
 fn convert_style(syntect_style: syntect::Style, use_bg_color: bool) -> Style {
     if use_bg_color {

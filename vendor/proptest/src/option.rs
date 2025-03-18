@@ -9,7 +9,7 @@
 
 //! Strategies for generating `std::Option` values.
 
-#![cfg_attr(feature = "cargo-clippy", allow(expl_impl_clone_on_copy))]
+#![cfg_attr(clippy, allow(expl_impl_clone_on_copy))]
 
 use core::fmt;
 use core::marker::PhantomData;
@@ -37,17 +37,6 @@ impl Default for Probability {
     /// The default probability is 0.5, or 50% chance.
     fn default() -> Self {
         prob(0.5)
-    }
-}
-
-impl From<f64> for Probability {
-    /// Creates a `Probability` from a `f64`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the probability is outside interval `[0.0, 1.0]`.
-    fn from(prob: f64) -> Self {
-        Probability::new(prob)
     }
 }
 
@@ -81,25 +70,14 @@ impl Probability {
     }
 }
 
-#[cfg(feature = "frunk")]
-use frunk_core::generic::Generic;
-
-#[cfg(feature = "frunk")]
-impl Generic for Probability {
-    type Repr = f64;
-
-    /// Converts the `Probability` into an `f64`.
-    fn into(self) -> Self::Repr {
-        self.0
-    }
-
+impl From<f64> for Probability {
     /// Creates a `Probability` from a `f64`.
     ///
     /// # Panics
     ///
     /// Panics if the probability is outside interval `[0.0, 1.0]`.
-    fn from(r: Self::Repr) -> Self {
-        r.into()
+    fn from(prob: f64) -> Self {
+        Probability::new(prob)
     }
 }
 

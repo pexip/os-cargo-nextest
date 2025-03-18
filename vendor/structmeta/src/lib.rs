@@ -77,7 +77,7 @@ pub use arg_types::*;
 ///
 /// # Helper attributes
 ///
-/// |                                                             | struct | enum | varaint | field |
+/// |                                                             | struct | enum | variant | field |
 /// | ----------------------------------------------------------- | ------ | ---- | ------- | ----- |
 /// | [`#[to_tokens("[")]`, `#[to_tokens("]")]`](#to_tokens-----) |        |      |         | ✔     |
 /// | [`#[to_tokens("(")]`, `#[to_tokens(")")]`](#to_tokens-----) |        |      |         | ✔     |
@@ -127,7 +127,7 @@ pub use arg_types::*;
 /// }
 /// ```
 ///
-/// If the field type is `Braket` or `Paren` or `Brace`, the symbol corresponding to the token type must be specified.
+/// If the field type is `Bracket` or `Paren` or `Brace`, the symbol corresponding to the token type must be specified.
 ///
 /// If the field type is `MacroDelimiter`, any symbol can be used and there is no difference in behavior. (Three types of parentheses are available, no matter which symbol is specified.)
 ///
@@ -222,7 +222,7 @@ pub use structmeta_derive::ToTokens;
 ///
 /// # Helper attributes
 ///
-/// |                                                                 | struct | enum | varaint | field |
+/// |                                                                 | struct | enum | variant | field |
 /// | --------------------------------------------------------------- | ------ | ---- | ------- | ----- |
 /// | [`#[to_tokens("[", "]", "(", ")", "{", "}")]`](#to_tokens-----) |        |      |         | ✔     |
 /// | [`#[parse(peek)]`](#parsepeek)                                  |        |      |         | ✔     |
@@ -279,7 +279,7 @@ pub use structmeta_derive::ToTokens;
 /// }
 /// ```
 ///
-/// If the field type is `Braket` or `Paren` or `Brace`, the symbol corresponding to the token type must be specified.
+/// If the field type is `Bracket` or `Paren` or `Brace`, the symbol corresponding to the token type must be specified.
 ///
 /// If the field type is `MacroDelimiter`, any symbol can be used and there is no difference in behavior. (Three types of parentheses are available, no matter which symbol is specified.)
 ///
@@ -360,7 +360,7 @@ pub use structmeta_derive::ToTokens;
 /// }
 /// ```
 ///
-/// To use `#[parse(peek)]` for a field that type is `Ident`, use `syn::Ident` insted of `proc_macro2::Ident`.
+/// To use `#[parse(peek)]` for a field that type is `Ident`, use `syn::Ident` instead of `proc_macro2::Ident`.
 ///
 /// ```compile_fail
 /// #[derive(structmeta::Parse)]
@@ -441,6 +441,7 @@ pub use structmeta_derive::Parse;
 ///   - [Supported field types for named parameter](#supported-field-types-for-named-parameter)
 ///   - [Flag style](#flag-style)
 ///   - [NameValue style](#namevalue-style)
+///   - [NameValue or Flag style](#namevalue-or-flag-style)
 ///   - [NameArgs style](#nameargs-style)
 ///   - [NameArgs or Flag style](#nameargs-or-flag-style)
 ///   - [NameArgList style](#namearglist-style)
@@ -506,6 +507,7 @@ pub use structmeta_derive::Parse;
 /// | ---------- | ---------------------------- | ------------------------------------------------- | ------------------------------- |
 /// | `bool`     | [`Flag`]                     | [Flag](#flag-style)                               | `name`                          |
 /// | `T`        | [`NameValue<T>`]             | [NameValue](#namevalue-style)                     | `name = value`                  |
+/// |            | [`NameValue<Option<T>>`]     | [NameValue or Flag](#namevalue-or-flag-style)     | `name = value` or `name`        |
 /// |            | [`NameArgs<T>`]              | [NameArgs](#nameargs-or-flag-style)               | `name(args)`                    |
 /// |            | [`NameArgs<Option<T>>`]      | [NameArgs or Flag](#nameargs-or-flag-style)       | `name(args)` or `name`          |
 /// | `Vec<T>`   | [`NameArgs<Vec<T>>`]         | [NameArgList](#namearglist-style)                 | `name(arg, arg, ...)`           |
@@ -586,6 +588,27 @@ pub use structmeta_derive::Parse;
 /// # syn::Result::Ok(())
 /// ```
 ///
+/// ## NameValue or Flag style
+///
+/// A field with type `NameArgs<Option<T>>` will be `name = value` or `name` style parameter.
+///
+/// ```rust
+/// use structmeta::{NameValue, StructMeta};
+/// use syn::{parse_quote, Attribute, LitInt, LitStr};
+///
+/// #[derive(StructMeta)]
+/// struct Args {
+///     a: NameValue<Option<LitStr>>,
+///     b: NameValue<Option<LitInt>>,
+/// }
+///
+/// let attr: Attribute = parse_quote!(#[attr(a, b = 10)]);
+/// let args: Args = attr.parse_args()?;
+/// assert!(args.a.value.is_none());
+/// assert_eq!(args.b.value.unwrap().base10_parse::<u32>()?, 10);
+/// # syn::Result::Ok(())
+/// ```
+///
 /// ## NameArgs style
 ///
 /// A field with type `NameArgs<T>` will be `name(args)` style parameter.
@@ -609,7 +632,7 @@ pub use structmeta_derive::Parse;
 ///
 /// ## NameArgs or Flag style
 ///
-/// A field with type `NameArgs<T>` will be `name(args)` or `name` style parameter.
+/// A field with type `NameArgs<Option<T>>` will be `name(args)` or `name` style parameter.
 ///
 /// ```rust
 /// use structmeta::{NameArgs, StructMeta};

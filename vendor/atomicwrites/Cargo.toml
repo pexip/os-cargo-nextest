@@ -11,13 +11,18 @@
 
 [package]
 name = "atomicwrites"
-version = "0.4.3"
+version = "0.4.4"
 authors = ["Markus Unterwaditzer <markus-honeypot@unterwaditzer.net>"]
+build = false
 exclude = [
     "/.travis.yml",
     "/Makefile",
     "/appveyor.yml",
 ]
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Atomic file-writes."
 homepage = "https://github.com/untitaker/rust-atomicwrites"
 documentation = "https://docs.rs/crate/atomicwrites"
@@ -28,6 +33,14 @@ keywords = [
 ]
 license = "MIT"
 repository = "https://github.com/untitaker/rust-atomicwrites"
+
+[lib]
+name = "atomicwrites"
+path = "src/lib.rs"
+
+[[test]]
+name = "lib"
+path = "tests/lib.rs"
 
 [dependencies.tempfile]
 version = "3.1"

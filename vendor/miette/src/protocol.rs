@@ -523,7 +523,7 @@ impl<'a> MietteSpanContents<'a> {
         }
     }
 
-    /// Sets the [`language`](SourceCode::language) for syntax highlighting.
+    /// Sets the [`language`](SpanContents::language) for syntax highlighting.
     pub fn with_language(mut self, language: impl Into<String>) -> Self {
         self.language = Some(language.into());
         self
@@ -610,6 +610,28 @@ impl From<std::ops::Range<ByteOffset>> for SourceSpan {
         Self {
             offset: range.start.into(),
             length: range.len(),
+        }
+    }
+}
+
+impl From<std::ops::RangeInclusive<ByteOffset>> for SourceSpan {
+    /// # Panics
+    ///
+    /// Panics if the total length of the inclusive range would overflow a
+    /// `usize`. This will only occur with the range `0..=usize::MAX`.
+    fn from(range: std::ops::RangeInclusive<ByteOffset>) -> Self {
+        let (start, end) = range.clone().into_inner();
+        Self {
+            offset: start.into(),
+            length: if range.is_empty() {
+                0
+            } else {
+                // will not overflow because `is_empty() == false` guarantees
+                // that `start <= end`
+                (end - start)
+                    .checked_add(1)
+                    .expect("length of inclusive range should fit in a usize")
+            },
         }
     }
 }

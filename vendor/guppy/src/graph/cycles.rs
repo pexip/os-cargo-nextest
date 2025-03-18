@@ -6,9 +6,9 @@
 //! See [`Cycles`][] for detailed docs.
 
 use crate::{
+    Error, PackageId,
     graph::{PackageGraph, PackageIx},
     petgraph_support::scc::Sccs,
-    Error, PackageId,
 };
 
 /// Contains information about dependency cycles.
@@ -269,7 +269,6 @@ use crate::{
 /// [serde_github]: https://github.com/serde-rs/serde
 /// [serde_toml]: https://github.com/serde-rs/serde/blob/072145e0e913df7686f001dbf29e43a0ff7afac4/serde/Cargo.toml#L17-L18
 /// [serde_derive_toml]: https://github.com/serde-rs/serde/blob/072145e0e913df7686f001dbf29e43a0ff7afac4/serde_derive/Cargo.toml#L29-L30
-
 pub struct Cycles<'g> {
     package_graph: &'g PackageGraph,
     sccs: &'g Sccs<PackageIx>,
@@ -301,9 +300,7 @@ impl<'g> Cycles<'g> {
     /// and Bar has a cyclic dev-dependency on Foo, then Foo is returned before Bar.
     ///
     /// See the type-level docs for details.
-    pub fn all_cycles(
-        &self,
-    ) -> impl Iterator<Item = Vec<&'g PackageId>> + DoubleEndedIterator + 'g {
+    pub fn all_cycles(&self) -> impl DoubleEndedIterator<Item = Vec<&'g PackageId>> + 'g {
         let dep_graph = &self.package_graph.dep_graph;
         self.sccs
             .multi_sccs()

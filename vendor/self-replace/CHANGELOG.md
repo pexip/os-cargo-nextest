@@ -2,6 +2,14 @@
 
 All notable changes to `self-replace` are documented here.
 
+## 1.5.0
+
+- Raised MSRV to 1.63 and upgraded windows-sys to 0.52.  #26
+
+## 1.4.0
+
+- Added `self_delete_at`.  #22
+
 ## 1.3.7
 
 - Fix windows dependency.  #16

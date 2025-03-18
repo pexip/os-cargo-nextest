@@ -1,9 +1,10 @@
 mod format;
-pub mod source;
+pub(crate) mod source;
 
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 
+use self::source::FileSource;
 use crate::error::{ConfigError, Result};
 use crate::map::Map;
 use crate::source::Source;
@@ -11,8 +12,6 @@ use crate::value::Value;
 use crate::Format;
 
 pub use self::format::FileFormat;
-use self::source::FileSource;
-
 pub use self::source::file::FileSourceFile;
 pub use self::source::string::FileSourceString;
 
@@ -31,7 +30,7 @@ pub struct File<T, F> {
     required: bool,
 }
 
-/// An extension of [`Format`](crate::Format) trait.
+/// An extension of [`Format`] trait.
 ///
 /// Associates format with file extensions, therefore linking storage-agnostic notion of format to a file system.
 pub trait FileStoredFormat: Format {
@@ -39,7 +38,7 @@ pub trait FileStoredFormat: Format {
     fn file_extensions(&self) -> &'static [&'static str];
 }
 
-impl<F> File<source::string::FileSourceString, F>
+impl<F> File<FileSourceString, F>
 where
     F: FileStoredFormat + 'static,
 {
@@ -52,7 +51,7 @@ where
     }
 }
 
-impl<F> File<source::file::FileSourceFile, F>
+impl<F> File<FileSourceFile, F>
 where
     F: FileStoredFormat + 'static,
 {
@@ -60,39 +59,39 @@ where
         Self {
             format: Some(format),
             required: true,
-            source: source::file::FileSourceFile::new(name.into()),
+            source: FileSourceFile::new(name.into()),
         }
     }
 }
 
-impl File<source::file::FileSourceFile, FileFormat> {
+impl File<FileSourceFile, FileFormat> {
     /// Given the basename of a file, will attempt to locate a file by setting its
     /// extension to a registered format.
     pub fn with_name(name: &str) -> Self {
         Self {
             format: None,
             required: true,
-            source: source::file::FileSourceFile::new(name.into()),
+            source: FileSourceFile::new(name.into()),
         }
     }
 }
 
-impl<'a> From<&'a Path> for File<source::file::FileSourceFile, FileFormat> {
+impl<'a> From<&'a Path> for File<FileSourceFile, FileFormat> {
     fn from(path: &'a Path) -> Self {
         Self {
             format: None,
             required: true,
-            source: source::file::FileSourceFile::new(path.to_path_buf()),
+            source: FileSourceFile::new(path.to_path_buf()),
         }
     }
 }
 
-impl From<PathBuf> for File<source::file::FileSourceFile, FileFormat> {
+impl From<PathBuf> for File<FileSourceFile, FileFormat> {
     fn from(path: PathBuf) -> Self {
         Self {
             format: None,
             required: true,
-            source: source::file::FileSourceFile::new(path),
+            source: FileSourceFile::new(path),
         }
     }
 }

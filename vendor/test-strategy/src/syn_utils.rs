@@ -20,14 +20,14 @@ use syn::{
 };
 
 macro_rules! bail {
-    ($span:expr, $message:literal $(,)?) => {
-        return std::result::Result::Err(syn::Error::new($span, $message))
+    (_, $($arg:tt)*) => {
+        bail!(::proc_macro2::Span::call_site(), $($arg)*)
     };
-    ($span:expr, $err:expr $(,)?) => {
-        return std::result::Result::Err(syn::Error::new($span, $err))
+    ($span:expr, $fmt:literal $(,)?) => {
+        return ::std::result::Result::Err(::syn::Error::new($span, ::std::format!($fmt)))
     };
-    ($span:expr, $fmt:expr, $($arg:tt)*) => {
-        return std::result::Result::Err(syn::Error::new($span, std::format!($fmt, $($arg)*)))
+    ($span:expr, $fmt:literal, $($arg:tt)*) => {
+        return ::std::result::Result::Err(::syn::Error::new($span, ::std::format!($fmt, $($arg)*)))
     };
 }
 
@@ -40,7 +40,7 @@ pub fn into_macro_output(input: Result<TokenStream>) -> proc_macro::TokenStream 
 }
 
 pub struct Parenthesized<T> {
-    pub paren_token: Option<Paren>,
+    pub _paren_token: Option<Paren>,
     pub content: T,
 }
 impl<T: Parse> Parse for Parenthesized<T> {
@@ -49,7 +49,7 @@ impl<T: Parse> Parse for Parenthesized<T> {
         let paren_token = Some(parenthesized!(content in input));
         let content = content.parse()?;
         Ok(Self {
-            paren_token,
+            _paren_token: paren_token,
             content,
         })
     }
@@ -136,10 +136,10 @@ impl SharpVals {
         while let Some(t) = iter.next() {
             match &t {
                 TokenTree::Group(g) => {
-                    tokens.push(TokenTree::Group(Group::new(
-                        g.delimiter(),
-                        self.expand(g.stream())?,
-                    )));
+                    let mut g_new =
+                        TokenTree::Group(Group::new(g.delimiter(), self.expand(g.stream())?));
+                    g_new.set_span(g.span());
+                    tokens.push(g_new);
                     continue;
                 }
                 TokenTree::Punct(p) => {

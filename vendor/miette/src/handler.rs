@@ -11,20 +11,15 @@ use crate::ThemeCharacters;
 use crate::ThemeStyles;
 
 /// Settings to control the color format used for graphical rendering.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum RgbColors {
     /// Use RGB colors even if the terminal does not support them
     Always,
     /// Use RGB colors instead of ANSI if the terminal supports RGB
     Preferred,
     /// Always use ANSI, regardless of terminal support for RGB
+    #[default]
     Never,
-}
-
-impl Default for RgbColors {
-    fn default() -> RgbColors {
-        RgbColors::Never
-    }
 }
 
 /**
@@ -62,6 +57,7 @@ pub struct MietteHandlerOpts {
     pub(crate) word_separator: Option<textwrap::WordSeparator>,
     pub(crate) word_splitter: Option<textwrap::WordSplitter>,
     pub(crate) highlighter: Option<MietteHighlighter>,
+    pub(crate) show_related_as_nested: Option<bool>,
 }
 
 impl MietteHandlerOpts {
@@ -94,7 +90,7 @@ impl MietteHandlerOpts {
     /// Syntax highlighting is disabled by default unless the
     /// `syntect-highlighter` feature is enabled. Call this method
     /// to override the default and use a custom highlighter
-    /// implmentation instead.
+    /// implementation instead.
     ///
     /// Use
     /// [`without_syntax_highlighting()`](MietteHandlerOpts::without_syntax_highlighting())
@@ -169,6 +165,18 @@ impl MietteHandlerOpts {
     /// Do not include the cause chain of the top-level error in the report.
     pub fn without_cause_chain(mut self) -> Self {
         self.with_cause_chain = Some(false);
+        self
+    }
+
+    /// Show related errors as siblings.
+    pub fn show_related_errors_as_siblings(mut self) -> Self {
+        self.show_related_as_nested = Some(false);
+        self
+    }
+
+    /// Show related errors as nested errors.
+    pub fn show_related_errors_as_nested(mut self) -> Self {
+        self.show_related_as_nested = Some(true);
         self
     }
 
@@ -336,6 +344,9 @@ impl MietteHandlerOpts {
             }
             if let Some(s) = self.word_splitter {
                 handler = handler.with_word_splitter(s)
+            }
+            if let Some(b) = self.show_related_as_nested {
+                handler = handler.with_show_related_as_nested(b)
             }
 
             MietteHandler {

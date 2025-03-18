@@ -4,14 +4,14 @@
 
 #![allow(unused_macros)]
 
-// On AArch64, the base register of load/store/atomic instructions must be 64-bit.
+// On AArch64, the base register of memory-related instructions must be 64-bit.
 // Passing a 32-bit value to `in(reg)` on AArch64 results in the upper bits
 // having an undefined value, but to work correctly with ILP32 ABI, the upper
 // bits must be zero, which is handled here by casting to u64. Another way to
 // handle this is to pass it as a pointer and clear the upper bits inside asm,
 // but it is easier to overlook than cast, which can catch overlooks by
 // asm_sub_register lint.
-// See also https://github.com/ARM-software/abi-aa/blob/2023Q1/aapcs64/aapcs64.rst#57pointers
+// See also https://github.com/ARM-software/abi-aa/blob/2024Q3/aapcs64/aapcs64.rst#pointers
 //
 // Except for x86_64, which can use 32-bit registers in the destination operand
 // (on x86_64, we use the ptr_modifier macro to handle this), we need to do the
@@ -21,7 +21,7 @@
 // recently submitted to the kernel, but in any case, this should be a safe
 // default for such ABIs).
 //
-// Known architectures that have such ABI are x86_64 (X32), aarch64 (ILP32),
+// Known architectures that have such ABI are x86_64 (X32), AArch64 (ILP32),
 // mips64 (N32), and riscv64 (s64ilp32, not merged yet though). (As of
 // 2023-06-05, only the former two are supported by rustc.) However, we list all
 // known 64-bit architectures because similar ABIs may exist or future added for
@@ -30,6 +30,7 @@
     target_pointer_width = "32",
     any(
         target_arch = "aarch64",
+        target_arch = "arm64ec",
         target_arch = "bpf",
         target_arch = "loongarch64",
         target_arch = "mips64",
@@ -43,6 +44,7 @@
         target_arch = "x86_64",
     ),
 ))]
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 macro_rules! ptr_reg {
     ($ptr:ident) => {{
         let _: *const _ = $ptr; // ensure $ptr is a pointer (*mut _ or *const _)
@@ -66,6 +68,7 @@ macro_rules! ptr_reg {
     target_pointer_width = "32",
     any(
         target_arch = "aarch64",
+        target_arch = "arm64ec",
         target_arch = "bpf",
         target_arch = "loongarch64",
         target_arch = "mips64",
@@ -79,6 +82,7 @@ macro_rules! ptr_reg {
         target_arch = "x86_64",
     ),
 )))]
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 macro_rules! ptr_reg {
     ($ptr:ident) => {{
         let _: *const _ = $ptr; // ensure $ptr is a pointer (*mut _ or *const _)
@@ -91,10 +95,10 @@ macro_rules! ptr_reg {
 // and fast, so use it to implement normal sequence lock.
 //
 // See ptr_reg macro for the reason why all known 64-bit architectures are listed.
-#[cfg(feature = "fallback")]
 #[cfg(any(
     not(any(target_pointer_width = "16", target_pointer_width = "32")), // i.e., 64-bit or greater
     target_arch = "aarch64",
+    target_arch = "arm64ec",
     target_arch = "bpf",
     target_arch = "loongarch64",
     target_arch = "mips64",
@@ -118,10 +122,10 @@ mod fast_atomic_64_macros {
         ($($tt:tt)*) => {};
     }
 }
-#[cfg(feature = "fallback")]
 #[cfg(not(any(
     not(any(target_pointer_width = "16", target_pointer_width = "32")), // i.e., 64-bit or greater
     target_arch = "aarch64",
+    target_arch = "arm64ec",
     target_arch = "bpf",
     target_arch = "loongarch64",
     target_arch = "mips64",

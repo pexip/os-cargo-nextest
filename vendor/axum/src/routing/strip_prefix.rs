@@ -14,13 +14,6 @@ pub(super) struct StripPrefix<S> {
 }
 
 impl<S> StripPrefix<S> {
-    pub(super) fn new(inner: S, prefix: &str) -> Self {
-        Self {
-            inner,
-            prefix: prefix.into(),
-        }
-    }
-
     pub(super) fn layer(prefix: &str) -> impl Layer<S, Service = Self> + Clone {
         let prefix = Arc::from(prefix);
         layer_fn(move |inner| Self {
@@ -111,7 +104,7 @@ fn strip_prefix(uri: &Uri, prefix: &str) -> Option<Uri> {
     }
 
     // if the prefix matches it will always do so up until a `/`, it cannot match only
-    // part of a segment. Therefore this will always be at a char boundary and `split_at` wont
+    // part of a segment. Therefore this will always be at a char boundary and `split_at` won't
     // panic
     let after_prefix = uri.path().split_at(matching_prefix_length?).1;
 

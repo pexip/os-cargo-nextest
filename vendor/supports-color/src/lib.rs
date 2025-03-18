@@ -23,9 +23,8 @@
 //! ```
 #![allow(clippy::bool_to_int_with_if)]
 
-use std::cell::UnsafeCell;
 use std::env;
-use std::sync::Once;
+use std::sync::OnceLock;
 
 /// possible stream sources
 #[derive(Clone, Copy, Debug)]
@@ -107,8 +106,7 @@ fn supports_color(stream: Stream) -> usize {
     {
         2
     } else if env::var("COLORTERM").is_ok()
-        || env::var("TERM").map(|term| check_ansi_color(&term)) == Ok(true)
-        || env::consts::OS == "windows"
+        || check_ansi_color(env::var("TERM").ok().as_deref())
         || env::var("CLICOLOR").map_or(false, |v| v != "0")
         || is_ci::uncached()
     {
@@ -118,16 +116,27 @@ fn supports_color(stream: Stream) -> usize {
     }
 }
 
-fn check_ansi_color(term: &str) -> bool {
-    term.starts_with("screen")
-        || term.starts_with("xterm")
-        || term.starts_with("vt100")
-        || term.starts_with("vt220")
-        || term.starts_with("rxvt")
-        || term.contains("color")
-        || term.contains("ansi")
-        || term.contains("cygwin")
-        || term.contains("linux")
+#[cfg(windows)]
+fn check_ansi_color(term: Option<&str>) -> bool {
+    if let Some(term) = term {
+        // cygwin doesn't seem to support ANSI escape sequences and instead has its own variety.
+        term != "dumb" && term != "cygwin"
+    } else {
+        // TERM is generally not set on Windows. It's reasonable to assume that all Windows
+        // terminals support ANSI escape sequences (since Windows 10 version 1511).
+        true
+    }
+}
+
+#[cfg(not(windows))]
+fn check_ansi_color(term: Option<&str>) -> bool {
+    if let Some(term) = term {
+        // dumb terminals don't support ANSI escape sequences.
+        term != "dumb"
+    } else {
+        // TERM is not set, which is really weird on Unix systems.
+        false
+    }
 }
 
 fn check_colorterm_16m(colorterm: &str) -> bool {
@@ -149,16 +158,6 @@ pub fn on(stream: Stream) -> Option<ColorLevel> {
     translate_level(supports_color(stream))
 }
 
-struct CacheCell(UnsafeCell<Option<ColorLevel>>);
-
-unsafe impl Sync for CacheCell {}
-
-static INIT: [Once; 2] = [Once::new(), Once::new()];
-static ON_CACHE: [CacheCell; 2] = [
-    CacheCell(UnsafeCell::new(None)),
-    CacheCell(UnsafeCell::new(None)),
-];
-
 macro_rules! assert_stream_in_bounds {
     ($($variant:ident)*) => {
         $(
@@ -177,12 +176,10 @@ be returned from then on.
 If you expect your environment to change between calls, use [`on`]
 */
 pub fn on_cached(stream: Stream) -> Option<ColorLevel> {
-    let stream_index = stream as usize;
-    INIT[stream_index].call_once(|| unsafe {
-        *ON_CACHE[stream_index].0.get() = translate_level(supports_color(stream));
-    });
+    static CACHE: [OnceLock<Option<ColorLevel>>; 2] = [OnceLock::new(), OnceLock::new()];
 
-    unsafe { *ON_CACHE[stream_index].0.get() }
+    let stream_index = stream as usize;
+    *CACHE[stream_index].get_or_init(|| translate_level(supports_color(stream)))
 }
 
 /**
@@ -242,6 +239,22 @@ mod tests {
 
         env::set_var("CLICOLOR", "0");
         assert_eq!(on(Stream::Stdout), None);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_on_cached() {
+        let _test_guard = TEST_LOCK.lock().unwrap();
+        set_up();
+        env::set_var("IGNORE_IS_TERMINAL", "1");
+
+        env::set_var("CLICOLOR", "1");
+        assert!(on(Stream::Stdout).is_some());
+        assert!(on_cached(Stream::Stdout).is_some());
+
+        env::set_var("CLICOLOR", "0");
+        assert!(on(Stream::Stdout).is_none());
+        assert!(on_cached(Stream::Stdout).is_some());
     }
 
     #[test]

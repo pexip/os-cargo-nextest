@@ -9,9 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- next-header -->
 ## [Unreleased] - ReleaseDate
+## [0.18.0] - 2025-02-20
+### Changed
+- [PR#77](https://github.com/EmbarkStudios/cfg-expr/pull/77) updated the builtin target list to 1.84.1 and 1.85.0.
+
+## [0.17.2] - 2024-11-29
+### Changed
+- [PR#76](https://github.com/EmbarkStudios/cfg-expr/pull/76) updated the builtin target list to 1.83.0.
+
+## [0.17.1] - 2024-11-15
+### Changed
+- [PR#75](https://github.com/EmbarkStudios/cfg-expr/pull/75) updated the builtin target list to 1.82.0.
+
+## [0.17.0] - 2024-09-05
+### Changed
+- [PR#74](https://github.com/EmbarkStudios/cfg-expr/pull/74) updated the builtin target list to 1.81.0.
+
+## [0.16.0] - 2024-07-29
+### Changed
+- [PR#70](https://github.com/EmbarkStudios/cfg-expr/pull/70) updated the builtin target list to 1.80.0. Thanks [@sunshowers](https://github.com/sunshowers)!
+
 ## [0.15.8] - 2024-04-10
 ### Changed
-- [PR#69](https://github.com/EmbarkStudios/cfg-expr/pull/67) updated the builtin target list to 1.77.2.
+- [PR#69](https://github.com/EmbarkStudios/cfg-expr/pull/69) updated the builtin target list to 1.77.2.
 
 ## [0.15.7] - 2024-02-09
 ### Changed
@@ -170,7 +190,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial add of all the things
 
 <!-- next-url -->
-[Unreleased]: https://github.com/EmbarkStudios/cfg-expr/compare/0.15.8...HEAD
+[Unreleased]: https://github.com/EmbarkStudios/cfg-expr/compare/0.18.0...HEAD
+[0.18.0]: https://github.com/EmbarkStudios/cfg-expr/compare/0.17.2...0.18.0
+[0.17.2]: https://github.com/EmbarkStudios/cfg-expr/compare/0.17.1...0.17.2
+[0.17.1]: https://github.com/EmbarkStudios/cfg-expr/compare/0.17.0...0.17.1
+[0.17.0]: https://github.com/EmbarkStudios/cfg-expr/compare/0.16.0...0.17.0
+[0.16.0]: https://github.com/EmbarkStudios/cfg-expr/compare/0.15.8...0.16.0
 [0.15.8]: https://github.com/EmbarkStudios/cfg-expr/compare/0.15.7...0.15.8
 [0.15.7]: https://github.com/EmbarkStudios/cfg-expr/compare/0.15.6...0.15.7
 [0.15.6]: https://github.com/EmbarkStudios/cfg-expr/compare/0.15.5...0.15.6

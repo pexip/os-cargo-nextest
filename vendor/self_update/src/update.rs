@@ -1,4 +1,7 @@
+use regex::Regex;
 use reqwest::{self, header};
+use std::borrow::Cow;
+use std::env::consts::{ARCH, OS};
 use std::fs;
 use std::path::PathBuf;
 
@@ -61,7 +64,8 @@ impl Release {
         self.assets
             .iter()
             .find(|asset| {
-                asset.name.contains(target)
+                (asset.name.contains(target)
+                    || (asset.name.contains(OS) && asset.name.contains(ARCH)))
                     && if let Some(i) = identifier {
                         asset.name.contains(i)
                     } else {
@@ -76,6 +80,9 @@ impl Release {
 pub trait ReleaseUpdate {
     /// Fetch details of the latest release from the backend
     fn get_latest_release(&self) -> Result<Release>;
+
+    /// Fetch details of the latest release from the backend
+    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>>;
 
     /// Fetch details of the release matching the specified version
     fn get_release_version(&self, ver: &str) -> Result<Release>;
@@ -101,7 +108,7 @@ pub trait ReleaseUpdate {
     fn bin_install_path(&self) -> PathBuf;
 
     /// Path of the binary to be extracted from release package
-    fn bin_path_in_archive(&self) -> PathBuf;
+    fn bin_path_in_archive(&self) -> String;
 
     /// Flag indicating if progress information shall be output when downloading a release
     fn show_download_progress(&self) -> bool;
@@ -168,14 +175,48 @@ pub trait ReleaseUpdate {
         let release = match self.target_version() {
             None => {
                 print_flush(show_output, "Checking latest released version... ")?;
-                let release = self.get_latest_release()?;
-                {
-                    println(show_output, &format!("v{}", release.version));
+                let releases = self.get_latest_releases(&current_version)?;
+                let release = {
+                    // Filter compatible version
+                    let compatible_releases = releases
+                        .iter()
+                        .filter(|r| {
+                            version::bump_is_compatible(&current_version, &r.version)
+                                .unwrap_or(false)
+                        })
+                        .collect::<Vec<_>>();
 
-                    if !version::bump_is_greater(&current_version, &release.version)? {
-                        return Ok(UpdateStatus::UpToDate);
+                    // Get the first version
+                    let release = compatible_releases.first().cloned();
+                    if let Some(release) = release {
+                        println(
+                            show_output,
+                            &format!(
+                                "v{} ({} versions compatible)",
+                                release.version,
+                                compatible_releases.len()
+                            ),
+                        );
+                        release.clone()
+                    } else {
+                        let release = releases.first();
+                        if let Some(release) = release {
+                            println(
+                                show_output,
+                                &format!(
+                                    "v{} ({} versions available)",
+                                    release.version,
+                                    releases.len()
+                                ),
+                            );
+                            release.clone()
+                        } else {
+                            return Ok(UpdateStatus::UpToDate);
+                        }
                     }
+                };
 
+                {
                     println(
                         show_output,
                         &format!(
@@ -194,6 +235,7 @@ pub trait ReleaseUpdate {
                         &format!("New release is {}compatible", qualifier),
                     );
                 }
+
                 release
             }
             Some(ref ver) => {
@@ -240,10 +282,25 @@ pub trait ReleaseUpdate {
         verify_signature(&tmp_archive_path, self.verifying_keys())?;
 
         print_flush(show_output, "Extracting archive... ")?;
-        let bin_path_in_archive = self.bin_path_in_archive();
+
+        let bin_path_str = Cow::Owned(self.bin_path_in_archive());
+
+        /// Substitute the `var` variable in a string with the given `val` value.
+        ///
+        /// Variable format: `{{ var }}`
+        fn substitute<'a: 'b, 'b>(str: &'a str, var: &str, val: &str) -> Cow<'b, str> {
+            let format = format!(r"\{{\{{[[:space:]]*{}[[:space:]]*\}}\}}", var);
+            Regex::new(&format).unwrap().replace_all(str, val)
+        }
+
+        let bin_path_str = substitute(&bin_path_str, "version", &release.version);
+        let bin_path_str = substitute(&bin_path_str, "target", &target);
+        let bin_path_str = substitute(&bin_path_str, "bin", &bin_name);
+        let bin_path_str = bin_path_str.as_ref();
+
         Extract::from_source(&tmp_archive_path)
-            .extract_file(tmp_archive_dir.path(), &bin_path_in_archive)?;
-        let new_exe = tmp_archive_dir.path().join(&bin_path_in_archive);
+            .extract_file(tmp_archive_dir.path(), bin_path_str)?;
+        let new_exe = tmp_archive_dir.path().join(bin_path_str);
 
         println(show_output, "Done");
 

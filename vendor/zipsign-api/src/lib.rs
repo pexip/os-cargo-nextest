@@ -1,4 +1,4 @@
-#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![forbid(unsafe_code)]
 #![allow(unknown_lints)]
 #![warn(absolute_paths_not_starting_with_crate)]
@@ -35,8 +35,8 @@ use std::io::{self, Read};
 
 #[doc(no_inline)]
 pub use ed25519_dalek::{
-    Signature, SignatureError, SigningKey, VerifyingKey, KEYPAIR_LENGTH, PUBLIC_KEY_LENGTH,
-    SIGNATURE_LENGTH,
+    KEYPAIR_LENGTH, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH, Signature, SignatureError, SigningKey,
+    VerifyingKey,
 };
 
 /// The unsigned hash of an input file
@@ -108,7 +108,7 @@ pub enum ZipsignError {
     #[cfg(feature = "verify-tar")]
     #[cfg_attr(docsrs, doc(cfg(feature = "verify-tar")))]
     VerifyTar(#[from] self::verify::VerifyTarError),
-    /// An error retuned by [`verify_zip()`][self::verify::verify_zip]
+    /// An error returned by [`verify_zip()`][self::verify::verify_zip]
     #[cfg(feature = "verify-zip")]
     #[cfg_attr(docsrs, doc(cfg(feature = "verify-zip")))]
     VerifyZip(#[from] self::verify::VerifyZipError),

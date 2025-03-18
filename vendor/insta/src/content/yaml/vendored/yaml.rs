@@ -5,7 +5,6 @@ use linked_hash_map::LinkedHashMap;
 
 use std::collections::BTreeMap;
 use std::f64;
-use std::i64;
 use std::mem;
 use std::ops::Index;
 use std::string;
@@ -15,8 +14,8 @@ use std::vec;
 /// access your YAML document.
 #[derive(Clone, PartialEq, PartialOrd, Debug, Eq, Ord, Hash)]
 pub enum Yaml {
-    /// Float types are stored as String and parsed on demand.
-    /// Note that f64 does NOT implement Eq trait and can NOT be stored in BTreeMap.
+    /// Float types are stored as [`String`] and parsed on demand.
+    /// Note that [`f64'] does NOT implement [`Eq'] trait and can NOT be stored in [`BTreeMap`].
     Real(string::String),
     /// YAML int is stored as i64.
     Integer(i64),

@@ -1,22 +1,4 @@
-#![cfg_attr(nightly_error_messages, feature(rustc_attrs))]
 //! axum is a web application framework that focuses on ergonomics and modularity.
-//!
-//! # Table of contents
-//!
-//! - [High-level features](#high-level-features)
-//! - [Compatibility](#compatibility)
-//! - [Example](#example)
-//! - [Routing](#routing)
-//! - [Handlers](#handlers)
-//! - [Extractors](#extractors)
-//! - [Responses](#responses)
-//! - [Error handling](#error-handling)
-//! - [Middleware](#middleware)
-//! - [Sharing state with handlers](#sharing-state-with-handlers)
-//! - [Building integrations for axum](#building-integrations-for-axum)
-//! - [Required dependencies](#required-dependencies)
-//! - [Examples](#examples)
-//! - [Feature flags](#feature-flags)
 //!
 //! # High-level features
 //!
@@ -53,11 +35,9 @@
 //!     // build our application with a single route
 //!     let app = Router::new().route("/", get(|| async { "Hello, World!" }));
 //!
-//!     // run it with hyper on localhost:3000
-//!     axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
-//!         .serve(app.into_make_service())
-//!         .await
-//!         .unwrap();
+//!     // run our app with hyper, listening globally on port 3000
+//!     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+//!     axum::serve(listener, app).await.unwrap();
 //! }
 //! ```
 //!
@@ -66,7 +46,7 @@
 //!
 //! # Routing
 //!
-//! [`Router`] is used to setup which paths goes to which services:
+//! [`Router`] is used to set up which paths goes to which services:
 //!
 //! ```rust
 //! use axum::{Router, routing::get};
@@ -82,9 +62,7 @@
 //! async fn get_foo() {}
 //! async fn post_foo() {}
 //! async fn foo_bar() {}
-//! # async {
-//! # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-//! # };
+//! # let _: Router = app;
 //! ```
 //!
 //! See [`Router`] for more details on routing.
@@ -145,9 +123,7 @@
 //! let app = Router::new()
 //!     .route("/plain_text", get(plain_text))
 //!     .route("/json", get(json));
-//! # async {
-//! # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-//! # };
+//! # let _: Router = app;
 //! ```
 //!
 //! See [`response`](crate::response) for more details on building responses.
@@ -202,9 +178,7 @@
 //! ) {
 //!     // ...
 //! }
-//! # async {
-//! # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-//! # };
+//! # let _: Router = app;
 //! ```
 //!
 //! You should prefer using [`State`] if possible since it's more type safe. The downside is that
@@ -240,9 +214,7 @@
 //! ) {
 //!     // ...
 //! }
-//! # async {
-//! # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-//! # };
+//! # let _: Router = app;
 //! ```
 //!
 //! The downside to this approach is that you'll get runtime errors
@@ -298,13 +270,72 @@
 //! struct CreateUserPayload {
 //!     // ...
 //! }
-//! # async {
-//! # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-//! # };
+//! # let _: Router = app;
 //! ```
 //!
 //! The downside to this approach is that it's a little more verbose than using
 //! [`State`] or extensions.
+//!
+//! ## Using [tokio's `task_local` macro](https://docs.rs/tokio/1/tokio/macro.task_local.html):
+//!
+//! This allows to share state with `IntoResponse` implementations.
+//!
+//! ```rust,no_run
+//! use axum::{
+//!     extract::Request,
+//!     http::{header, StatusCode},
+//!     middleware::{self, Next},
+//!     response::{IntoResponse, Response},
+//!     routing::get,
+//!     Router,
+//! };
+//! use tokio::task_local;
+//!
+//! #[derive(Clone)]
+//! struct CurrentUser {
+//!     name: String,
+//! }
+//! task_local! {
+//!     pub static USER: CurrentUser;
+//! }
+//!
+//! async fn auth(req: Request, next: Next) -> Result<Response, StatusCode> {
+//!     let auth_header = req
+//!         .headers()
+//!         .get(header::AUTHORIZATION)
+//!         .and_then(|header| header.to_str().ok())
+//!         .ok_or(StatusCode::UNAUTHORIZED)?;
+//!     if let Some(current_user) = authorize_current_user(auth_header).await {
+//!         // State is setup here in the middleware
+//!         Ok(USER.scope(current_user, next.run(req)).await)
+//!     } else {
+//!         Err(StatusCode::UNAUTHORIZED)
+//!     }
+//! }
+//! async fn authorize_current_user(auth_token: &str) -> Option<CurrentUser> {
+//!     Some(CurrentUser {
+//!         name: auth_token.to_string(),
+//!     })
+//! }
+//!
+//! struct UserResponse;
+//!
+//! impl IntoResponse for UserResponse {
+//!     fn into_response(self) -> Response {
+//!         // State is accessed here in the IntoResponse implementation
+//!         let current_user = USER.with(|u| u.clone());
+//!         (StatusCode::OK, current_user.name).into_response()
+//!     }
+//! }
+//!
+//! async fn handler() -> UserResponse {
+//!     UserResponse
+//! }
+//!
+//! let app: Router = Router::new()
+//!     .route("/", get(handler))
+//!     .route_layer(middleware::from_fn(auth));
+//! ```
 //!
 //! # Building integrations for axum
 //!
@@ -320,16 +351,11 @@
 //! ```toml
 //! [dependencies]
 //! axum = "<latest-version>"
-//! hyper = { version = "<latest-version>", features = ["full"] }
 //! tokio = { version = "<latest-version>", features = ["full"] }
 //! tower = "<latest-version>"
 //! ```
 //!
-//! The `"full"` feature for hyper and tokio isn't strictly necessary but it's
-//! the easiest way to get started.
-//!
-//! Note that [`hyper::Server`] is re-exported by axum so if that's all you need
-//! then you don't have to explicitly depend on hyper.
+//! The `"full"` feature for tokio isn't necessary but it's the easiest way to get started.
 //!
 //! Tower isn't strictly necessary either but helpful for testing. See the
 //! testing example in the repo to learn more about testing axum apps.
@@ -348,7 +374,6 @@
 //!
 //! Name | Description | Default?
 //! ---|---|---
-//! `headers` | Enables extracting typed headers via [`TypedHeader`] | No
 //! `http1` | Enables hyper's `http1` feature | Yes
 //! `http2` | Enables hyper's `http2` feature | No
 //! `json` | Enables the [`Json`] type and some similar convenience functionality | Yes
@@ -356,14 +381,13 @@
 //! `matched-path` | Enables capturing of every request's router path and the [`MatchedPath`] extractor | Yes
 //! `multipart` | Enables parsing `multipart/form-data` requests with [`Multipart`] | No
 //! `original-uri` | Enables capturing of every request's original URI and the [`OriginalUri`] extractor | Yes
-//! `tokio` | Enables `tokio` as a dependency and `axum::Server`, `SSE` and `extract::connect_info` types. | Yes
+//! `tokio` | Enables `tokio` as a dependency and `axum::serve`, `SSE` and `extract::connect_info` types. | Yes
 //! `tower-log` | Enables `tower`'s `log` feature | Yes
-//! `tracing` | Log rejections from built-in extractors | No
+//! `tracing` | Log rejections from built-in extractors | Yes
 //! `ws` | Enables WebSockets support via [`extract::ws`] | No
 //! `form` | Enables the `Form` extractor | Yes
 //! `query` | Enables the `Query` extractor | Yes
 //!
-//! [`TypedHeader`]: crate::extract::TypedHeader
 //! [`MatchedPath`]: crate::extract::MatchedPath
 //! [`Multipart`]: crate::extract::Multipart
 //! [`OriginalUri`]: crate::extract::OriginalUri
@@ -377,7 +401,6 @@
 //! [`Timeout`]: tower::timeout::Timeout
 //! [examples]: https://github.com/tokio-rs/axum/tree/main/examples
 //! [`Router::merge`]: crate::routing::Router::merge
-//! [`axum::Server`]: hyper::server::Server
 //! [`Service`]: tower::Service
 //! [`Service::poll_ready`]: tower::Service::poll_ready
 //! [`Service`'s]: tower::Service
@@ -409,7 +432,6 @@
     clippy::needless_borrow,
     clippy::match_wildcard_for_single_variants,
     clippy::if_let_mutex,
-    clippy::mismatched_target_os,
     clippy::await_holding_lock,
     clippy::match_on_vec_items,
     clippy::imprecise_flops,
@@ -431,7 +453,7 @@
     missing_debug_implementations,
     missing_docs
 )]
-#![deny(unreachable_pub, private_in_public)]
+#![deny(unreachable_pub)]
 #![allow(elided_lifetimes_in_paths, clippy::type_complexity)]
 #![forbid(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg, doc_cfg))]
@@ -448,8 +470,6 @@ mod form;
 #[cfg(feature = "json")]
 mod json;
 mod service_ext;
-#[cfg(feature = "headers")]
-mod typed_header;
 mod util;
 
 pub mod body;
@@ -459,20 +479,16 @@ pub mod handler;
 pub mod middleware;
 pub mod response;
 pub mod routing;
+#[cfg(all(feature = "tokio", any(feature = "http1", feature = "http2")))]
+pub mod serve;
 
 #[cfg(test)]
 mod test_helpers;
 
 #[doc(no_inline)]
 pub use async_trait::async_trait;
-#[cfg(feature = "headers")]
-#[doc(no_inline)]
-pub use headers;
 #[doc(no_inline)]
 pub use http;
-#[cfg(feature = "tokio")]
-#[doc(no_inline)]
-pub use hyper::Server;
 
 #[doc(inline)]
 pub use self::extension::Extension;
@@ -483,10 +499,6 @@ pub use self::json::Json;
 pub use self::routing::Router;
 
 #[doc(inline)]
-#[cfg(feature = "headers")]
-pub use self::typed_header::TypedHeader;
-
-#[doc(inline)]
 #[cfg(feature = "form")]
 pub use self::form::Form;
 
@@ -494,7 +506,11 @@ pub use self::form::Form;
 pub use axum_core::{BoxError, Error, RequestExt, RequestPartsExt};
 
 #[cfg(feature = "macros")]
-pub use axum_macros::debug_handler;
+pub use axum_macros::{debug_handler, debug_middleware};
+
+#[cfg(all(feature = "tokio", any(feature = "http1", feature = "http2")))]
+#[doc(inline)]
+pub use self::serve::serve;
 
 pub use self::service_ext::ServiceExt;
 
